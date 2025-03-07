@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/md5"
+	"encoding/binary"
 	"fmt"
 	"github.com/asticode/go-astisub"
 	"github.com/haguro/elevenlabs-go"
@@ -48,11 +49,68 @@ type AudioFile struct {
 	Channel int
 }
 
-func writeFinalMP3(files []AudioFile, outputPath string, numChannels int) error {
+func writeWavHeader(w io.Writer, dataSize int, numChannels int) error {
+	// RIFF header
+	if _, err := w.Write([]byte("RIFF")); err != nil {
+		return err
+	}
+	// Total file size - 8 bytes
+	if err := binary.Write(w, binary.LittleEndian, uint32(dataSize+36)); err != nil {
+		return err
+	}
+	// WAVE header
+	if _, err := w.Write([]byte("WAVE")); err != nil {
+		return err
+	}
+	// fmt chunk
+	if _, err := w.Write([]byte("fmt ")); err != nil {
+		return err
+	}
+	// fmt chunk size (16 bytes)
+	if err := binary.Write(w, binary.LittleEndian, uint32(16)); err != nil {
+		return err
+	}
+	// Audio format (1 = PCM)
+	if err := binary.Write(w, binary.LittleEndian, uint16(1)); err != nil {
+		return err
+	}
+	// Number of channels
+	if err := binary.Write(w, binary.LittleEndian, uint16(numChannels)); err != nil {
+		return err
+	}
+	// Sample rate
+	if err := binary.Write(w, binary.LittleEndian, uint32(44100)); err != nil {
+		return err
+	}
+	// Byte rate
+	if err := binary.Write(w, binary.LittleEndian, uint32(44100*numChannels*2)); err != nil {
+		return err
+	}
+	// Block align
+	if err := binary.Write(w, binary.LittleEndian, uint16(numChannels*2)); err != nil {
+		return err
+	}
+	// Bits per sample
+	if err := binary.Write(w, binary.LittleEndian, uint16(16)); err != nil {
+		return err
+	}
+	// data chunk
+	if _, err := w.Write([]byte("data")); err != nil {
+		return err
+	}
+	// data size
+	if err := binary.Write(w, binary.LittleEndian, uint32(dataSize)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func combineAudioFiles(files []AudioFile, outputPath string, numChannels int) error {
 	const sampleRate = 44100
 	const bytesPerSample = 2 // 16-bit audio
 
 	var totalLength int
+	// First pass: calculate total length
 	for _, file := range files {
 		f, err := os.Open(file.Path)
 		if err != nil {
@@ -71,7 +129,7 @@ func writeFinalMP3(files []AudioFile, outputPath string, numChannels int) error 
 	// Create the final audio buffer
 	audioBuffer := make([]byte, totalLength)
 
-	// Read and place each file's audio data into the buffer at the specified offset
+	// Read and place each file's audio data
 	for _, file := range files {
 		f, err := os.Open(file.Path)
 		if err != nil {
@@ -85,25 +143,36 @@ func writeFinalMP3(files []AudioFile, outputPath string, numChannels int) error 
 		}
 
 		offsetBytes := int(file.Offset.Seconds() * float64(sampleRate) * float64(numChannels) * float64(bytesPerSample))
-		_, err = io.ReadFull(decoder, audioBuffer[offsetBytes:])
-		if err != nil && err != io.EOF {
-			return err
+		buf := make([]byte, 4096)
+		written := offsetBytes
+		for {
+			n, err := decoder.Read(buf)
+			if n > 0 {
+				copy(audioBuffer[written:], buf[:n])
+				written += n
+			}
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return err
+			}
 		}
 	}
 
-	// Write the buffer to the output MP3 file
-	outputFile, err := os.Create(outputPath)
+	// Write WAV file
+	f, err := os.Create(outputPath)
 	if err != nil {
 		return err
 	}
-	defer outputFile.Close()
+	defer f.Close()
 
-	_, err = outputFile.Write(audioBuffer)
-	if err != nil {
+	if err := writeWavHeader(f, totalLength, numChannels); err != nil {
 		return err
 	}
 
-	return nil
+	_, err = f.Write(audioBuffer)
+	return err
 }
 
 func readConfig(filename string) (*Config, error) {
@@ -217,10 +286,12 @@ func main() {
 	}
 
 	// Write the final MP3 file
-	outputPath := strings.TrimSuffix(vttPath, filepath.Ext(vttPath)) + ".mp3"
+	outputPath := strings.TrimSuffix(vttPath, filepath.Ext(vttPath)) + ".wav"
 
-	if err := writeFinalMP3(audioFiles, outputPath, 2); err != nil {
-		log.Fatalf("Error writing final MP3 file: %v", err)
+	// TODO: 2 is hardcoded here, but it should be the number of channels in the final audio track
+	// calculate it from the number of models
+	if err := combineAudioFiles(audioFiles, outputPath, 2); err != nil {
+		log.Fatalf("Error writing final audio track: %v", err)
 	}
-	log.Printf("Final MP3 file written to %s\n", outputPath)
+	log.Printf("Final audio track written to %s\n", outputPath)
 }
