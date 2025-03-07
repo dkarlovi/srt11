@@ -69,16 +69,30 @@ func generateFilename(item *astisub.Item, model Model) string {
 
 	checksum := md5.Sum([]byte(model.name + dialog))
 
-	return fmt.Sprintf("%04d-%s-%s.%X.wav", item.Index, model.name, dialog, checksum[:2])
+	return fmt.Sprintf("%04d-%s-%s.%X.mp3", item.Index, model.name, dialog, checksum[:2])
 }
 
 func generateVoiceLine(client *elevenlabs.Client, item *Item) {
 	if _, err := os.Stat(item.Path); err == nil {
-		log.Printf("Skipping %s\n", item.Path)
+		log.Printf("Already spoke (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
 		return
 	}
 
 	log.Printf("Speaking (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
+	ttsReq := elevenlabs.TextToSpeechRequest{
+		Text:    item.Sub.String(),
+		ModelID: "eleven_multilingual_v2",
+	}
+
+	audio, err := client.TextToSpeech(item.Model.model, ttsReq)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := os.WriteFile(item.Path, audio, 0644); err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("Wrote %s\n", item.Path)
 }
 
 func main() {
