@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"github.com/asticode/go-astisub"
 	"github.com/haguro/elevenlabs-go"
+	"github.com/hajimehoshi/go-mp3"
 	"gopkg.in/yaml.v2"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
@@ -29,14 +31,79 @@ type Config struct {
 }
 
 type Model struct {
-	model string
-	name  string
+	model  string
+	name   string
+	offset int
 }
 
 type Item struct {
 	Sub   *astisub.Item
 	Model Model
 	Path  string
+}
+
+type AudioFile struct {
+	Path    string
+	Offset  time.Duration
+	Channel int
+}
+
+func writeFinalMP3(files []AudioFile, outputPath string, numChannels int) error {
+	const sampleRate = 44100
+	const bytesPerSample = 2 // 16-bit audio
+
+	var totalLength int
+	for _, file := range files {
+		f, err := os.Open(file.Path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		decoder, err := mp3.NewDecoder(f)
+		if err != nil {
+			return err
+		}
+		offsetBytes := int(file.Offset.Seconds() * float64(sampleRate) * float64(numChannels) * float64(bytesPerSample))
+		totalLength = max(totalLength, offsetBytes+int(decoder.Length()))
+	}
+
+	// Create the final audio buffer
+	audioBuffer := make([]byte, totalLength)
+
+	// Read and place each file's audio data into the buffer at the specified offset
+	for _, file := range files {
+		f, err := os.Open(file.Path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		decoder, err := mp3.NewDecoder(f)
+		if err != nil {
+			return err
+		}
+
+		offsetBytes := int(file.Offset.Seconds() * float64(sampleRate) * float64(numChannels) * float64(bytesPerSample))
+		_, err = io.ReadFull(decoder, audioBuffer[offsetBytes:])
+		if err != nil && err != io.EOF {
+			return err
+		}
+	}
+
+	// Write the buffer to the output MP3 file
+	outputFile, err := os.Create(outputPath)
+	if err != nil {
+		return err
+	}
+	defer outputFile.Close()
+
+	_, err = outputFile.Write(audioBuffer)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func readConfig(filename string) (*Config, error) {
@@ -117,15 +184,15 @@ func main() {
 		var model Model
 		sub.Index = i + 1
 		if len(sub.Comments) > 0 {
-			model = Model{name: config.Models[sub.Comments[0]].Name, model: config.Models[sub.Comments[0]].Model}
+			model = Model{name: config.Models[sub.Comments[0]].Name, model: config.Models[sub.Comments[0]].Model, offset: 1}
 		} else {
 			re := regexp.MustCompile(`\[(.*?)\]\s*(.+)`)
 			match := re.FindStringSubmatch(sub.String())
 			if len(match) > 1 {
-				model = Model{name: config.Models[match[1]].Name, model: config.Models[match[1]].Model}
+				model = Model{name: config.Models[match[1]].Name, model: config.Models[match[1]].Model, offset: 1}
 				sub.Lines[0].Items[0].Text = match[2]
 			} else {
-				model = Model{name: config.Default.Name, model: config.Default.Model}
+				model = Model{name: config.Default.Name, model: config.Default.Model, offset: 0}
 			}
 		}
 
@@ -141,10 +208,19 @@ func main() {
 
 	// TODO print items here in a readable format for debugging
 
+	// Generate voice lines for each item, skipping those that have already been generated
 	client := elevenlabs.NewClient(context.Background(), config.AuthKey, 30*time.Second)
+	audioFiles := make([]AudioFile, 0)
 	for _, item := range items {
 		generateVoiceLine(client, &item)
+		audioFiles = append(audioFiles, AudioFile{Path: item.Path, Offset: item.Sub.StartAt, Channel: 0})
 	}
 
-	log.Println("Processing complete. Final file written to disk.")
+	// Write the final MP3 file
+	outputPath := strings.TrimSuffix(vttPath, filepath.Ext(vttPath)) + ".mp3"
+
+	if err := writeFinalMP3(audioFiles, outputPath, 2); err != nil {
+		log.Fatalf("Error writing final MP3 file: %v", err)
+	}
+	log.Printf("Final MP3 file written to %s\n", outputPath)
 }
