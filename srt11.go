@@ -1,23 +1,40 @@
 package main
 
 import (
-	"context"
+	"crypto/md5"
 	"fmt"
-	"io/ioutil"
-	"log"
-	"os"
-	"strings"
-	"time"
-
 	"github.com/asticode/go-astisub"
 	"github.com/haguro/elevenlabs-go"
 	"gopkg.in/yaml.v2"
+	"io/ioutil"
+	"log"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 )
 
 type Config struct {
-	AuthKey string            `yaml:"auth_key"`
-	Models  map[string]string `yaml:"models"`
-	Default string            `yaml:"default"`
+	AuthKey string `yaml:"auth_key"`
+	Default struct {
+		Model string `yaml:"model"`
+		Name  string `yaml:"name"`
+	} `yaml:"default"`
+	Models map[string]struct {
+		Model string `yaml:"model"`
+		Name  string `yaml:"name"`
+	} `yaml:"models"`
+}
+
+type Model struct {
+	model string
+	name  string
+}
+
+type Item struct {
+	Sub   *astisub.Item
+	Model Model
+	Path  string
 }
 
 func readConfig(filename string) (*Config, error) {
@@ -33,62 +50,78 @@ func readConfig(filename string) (*Config, error) {
 	return &config, nil
 }
 
-func parseSRT(filename string) (*astisub.Subtitles, error) {
+func parseVTT(filename string) (*astisub.Subtitles, error) {
 	return astisub.OpenFile(filename)
 }
 
-func generateVoiceLine(client *elevenlabs.Client, text, model, previousID string) (string, error) {
-	// Implement the API call to ElevenLabs TTS here
-	// This is a placeholder function
-	return "path/to/generated/audio/file", nil
+func generateFilename(item *astisub.Item, model Model) string {
+	re := regexp.MustCompile(`[,.!?'<>:"/\\|?*\x00-\x1F]`)
+	dialog := re.ReplaceAllString(item.String(), "")
+	dialog = strings.ToLower(dialog)
+	dialog = strings.Replace(dialog, " ", "_", -1)
+	dialog = strings.TrimSpace(dialog)
+
+	if len(dialog) > 50 {
+		dialog = dialog[:50]
+	}
+
+	checksum := md5.Sum([]byte(model.name + dialog))
+
+	return fmt.Sprintf("%04d-%s-%s.%X.wav", item.Index, model.name, dialog, checksum[:2])
+}
+
+func generateVoiceLine(client *elevenlabs.Client, item *Item) {
+
 }
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Fatalf("Usage: %s <path to SRT file>", os.Args[0])
+		log.Fatalf("Usage: %s <path to VTT file>", os.Args[0])
 	}
-	srtPath := os.Args[1]
+	vttPath := os.Args[1]
 
 	config, err := readConfig("config.yaml")
 	if err != nil {
 		log.Fatalf("Error reading config: %v", err)
 	}
 
-	subs, err := parseSRT(srtPath)
+	subs, err := parseVTT(vttPath)
 	if err != nil {
-		log.Fatalf("Error parsing SRT file: %v", err)
+		log.Fatalf("Error parsing VTT file: %v", err)
 	}
+	realDir, _ := filepath.Abs(filepath.Dir(vttPath))
 
-	client := elevenlabs.NewClient(context.Background(), config.AuthKey, 30*time.Second)
-
-	var previousID string
-	for _, item := range subs.Items {
-		text := item.String()
-		model := config.Default
-		if strings.HasPrefix(text, "@") {
-			parts := strings.SplitN(text, " ", 2)
-			if len(parts) > 1 {
-				modelKey := strings.TrimPrefix(parts[0], "@")
-				if m, ok := config.Models[modelKey]; ok {
-					model = m
-				} else {
-					log.Fatalf("Unknown model: %s", modelKey)
-				}
-				text = parts[1]
+	var items = make([]Item, 0)
+	for i, sub := range subs.Items {
+		var model Model
+		sub.Index = i + 1
+		if len(sub.Comments) > 0 {
+			model = Model{name: config.Models[sub.Comments[0]].Name, model: config.Models[sub.Comments[0]].Model}
+		} else {
+			re := regexp.MustCompile(`\[(.*?)\]\s*(.+)`)
+			match := re.FindStringSubmatch(sub.String())
+			if len(match) > 1 {
+				model = Model{name: config.Models[match[1]].Name, model: config.Models[match[1]].Model}
+				sub.Lines[0].Items[0].Text = match[2]
+			} else {
+				model = Model{name: config.Default.Name, model: config.Default.Model}
 			}
 		}
 
-		audioPath, err := generateVoiceLine(client, text, model, previousID)
-		if err != nil {
-			log.Fatalf("Error generating voice line: %v", err)
+		path := filepath.Join(realDir, generateFilename(sub, model))
+		item := Item{
+			Sub:   sub,
+			Model: model,
+			Path:  path,
 		}
+		log.Print(item)
 
-		// Store the audioPath and handle timings here
-		previousID = audioPath // Update previousID for the next line
+		items = append(items, item)
 	}
 
-	// Combine audio files into a final file with separate tracks
-	// Implement the audio combining logic here
+	// TODO print items here in a readable format for debugging
+
+	// client := elevenlabs.NewClient(context.Background(), config.AuthKey, 30*time.Second)
 
 	fmt.Println("Processing complete. Final file written to disk.")
 }
