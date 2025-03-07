@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/md5"
 	"fmt"
 	"github.com/asticode/go-astisub"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -71,7 +73,12 @@ func generateFilename(item *astisub.Item, model Model) string {
 }
 
 func generateVoiceLine(client *elevenlabs.Client, item *Item) {
+	if _, err := os.Stat(item.Path); err == nil {
+		log.Printf("Skipping %s\n", item.Path)
+		return
+	}
 
+	log.Printf("Speaking (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
 }
 
 func main() {
@@ -114,14 +121,16 @@ func main() {
 			Model: model,
 			Path:  path,
 		}
-		log.Print(item)
 
 		items = append(items, item)
 	}
 
 	// TODO print items here in a readable format for debugging
 
-	// client := elevenlabs.NewClient(context.Background(), config.AuthKey, 30*time.Second)
+	client := elevenlabs.NewClient(context.Background(), config.AuthKey, 30*time.Second)
+	for _, item := range items {
+		generateVoiceLine(client, &item)
+	}
 
-	fmt.Println("Processing complete. Final file written to disk.")
+	log.Println("Processing complete. Final file written to disk.")
 }
