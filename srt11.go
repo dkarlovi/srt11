@@ -65,6 +65,22 @@ func readConfig(filename string) (*Config, error) {
 	return &config, nil
 }
 
+func buildModelChannelMap(config *Config) map[string]int {
+	channels := make(map[string]int)
+	// Default model always goes to channel 0
+	channels[config.Default.Name] = 0
+
+	currentChannel := 1
+	// Assign unique channels to each distinct model
+	for _, model := range config.Models {
+		if _, exists := channels[model.Name]; !exists {
+			channels[model.Name] = currentChannel
+			currentChannel++
+		}
+	}
+	return channels
+}
+
 func parseSubtitle(filename string) (*astisub.Subtitles, error) {
 	return astisub.OpenFile(filename)
 }
@@ -197,6 +213,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error reading config: %v", err)
 	}
+	modelChannels := buildModelChannelMap(config)
 
 	subs, err := parseSubtitle(vttPath)
 	if err != nil {
@@ -209,12 +226,12 @@ func main() {
 		var model Model
 		sub.Index = i + 1
 		if len(sub.Comments) > 0 {
-			model = Model{name: config.Models[sub.Comments[0]].Name, model: config.Models[sub.Comments[0]].Model, offset: 1}
+			model = Model{name: config.Models[sub.Comments[0]].Name, model: config.Models[sub.Comments[0]].Model, offset: modelChannels[sub.Comments[0]]}
 		} else {
 			re := regexp.MustCompile(`\[(.*?)\]\s*(.+)`)
 			match := re.FindStringSubmatch(sub.String())
 			if len(match) > 1 {
-				model = Model{name: config.Models[match[1]].Name, model: config.Models[match[1]].Model, offset: 1}
+				model = Model{name: config.Models[match[1]].Name, model: config.Models[match[1]].Model, offset: modelChannels[match[0]]}
 				sub.Lines[0].Items[0].Text = match[2]
 			} else {
 				model = Model{name: config.Default.Name, model: config.Default.Model, offset: 0}
@@ -244,9 +261,7 @@ func main() {
 	// Write the final MP3 file
 	outputPath := strings.TrimSuffix(vttPath, filepath.Ext(vttPath)) + ".wav"
 
-	// TODO: 2 is hardcoded here, but it should be the number of channels in the final audio track
-	// calculate it from the number of models
-	if err := combineAudioFiles(audioFiles, outputPath, 2); err != nil {
+	if err := combineAudioFiles(audioFiles, outputPath, len(modelChannels)); err != nil {
 		log.Fatalf("Error writing final audio track: %v", err)
 	}
 	log.Printf("Final audio track written to %s\n", outputPath)
