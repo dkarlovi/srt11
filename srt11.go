@@ -255,7 +255,7 @@ func main() {
 	audioFiles := make([]AudioFile, 0)
 	for _, item := range items {
 		generateVoiceLine(client, &item)
-		audioFiles = append(audioFiles, AudioFile{Path: item.Path, Offset: item.Sub.StartAt, Channel: 0})
+		audioFiles = append(audioFiles, AudioFile{Path: item.Path, Offset: item.Sub.StartAt, Channel: item.Model.offset})
 	}
 
 	// Write the final MP3 file
