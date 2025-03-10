@@ -180,19 +180,18 @@ func combineAudioFiles(files []AudioFile, outputPath string) error {
 	var maxEndTime time.Duration
 	for _, file := range files {
 		f, err := os.Open(file.Path)
+		defer f.Close()
 		if err != nil {
 			return fmt.Errorf("failed to open file %s: %w", file.Path, err)
 		}
 		decoder, err := mp3.NewDecoder(f)
 		if err != nil {
-			f.Close()
 			return fmt.Errorf("failed to create decoder for %s: %w", file.Path, err)
 		}
 		endTime := file.Offset + time.Duration(float64(decoder.Length())/float64(decoder.SampleRate())*float64(time.Second))
 		if endTime > maxEndTime {
 			maxEndTime = endTime
 		}
-		f.Close()
 	}
 
 	totalSamples := int(maxEndTime.Seconds()*float64(sampleRate)) * numChannels
