@@ -149,12 +149,12 @@ func generateVoiceLine(client *elevenlabs.Client, item *Item) AudioFile {
 		ModelID: "eleven_multilingual_v2",
 	}
 
-	audio, err := client.TextToSpeech(item.Model.model, ttsReq)
+	speech, err := client.TextToSpeech(item.Model.model, ttsReq)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	if err := os.WriteFile(item.Path, audio, 0644); err != nil {
+	if err := os.WriteFile(item.Path, speech, 0644); err != nil {
 		log.Fatal(err)
 	}
 	log.Printf("Wrote %s\n", item.Path)
