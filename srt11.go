@@ -81,8 +81,44 @@ func buildModelChannelMap(config *Config) map[string]int {
 	return channels
 }
 
-func parseSubtitle(filename string) (*astisub.Subtitles, error) {
-	return astisub.OpenFile(filename)
+func parseSubtitle(config *Config, filename string) []Item {
+	modelChannels := buildModelChannelMap(config)
+
+	subs, err := astisub.OpenFile(filename)
+
+	if err != nil {
+		log.Fatalf("Error parsing VTT file: %v", err)
+	}
+	realDir, _ := filepath.Abs(filepath.Dir(filename))
+
+	var items = make([]Item, 0)
+	for i, sub := range subs.Items {
+		var model Model
+		sub.Index = i + 1
+		if len(sub.Comments) > 0 {
+			model = Model{name: config.Models[sub.Comments[0]].Name, model: config.Models[sub.Comments[0]].Model, offset: modelChannels[sub.Comments[0]]}
+		} else {
+			re := regexp.MustCompile(`\[(.*?)\]\s*(.+)`)
+			match := re.FindStringSubmatch(sub.String())
+			if len(match) > 1 {
+				model = Model{name: config.Models[match[1]].Name, model: config.Models[match[1]].Model, offset: modelChannels[match[0]]}
+				sub.Lines[0].Items[0].Text = match[2]
+			} else {
+				model = Model{name: config.Default.Name, model: config.Default.Model, offset: 0}
+			}
+		}
+
+		path := filepath.Join(realDir, generateFilename(sub, model))
+		item := Item{
+			Sub:   sub,
+			Model: model,
+			Path:  path,
+		}
+
+		items = append(items, item)
+	}
+
+	return items
 }
 
 func generateFilename(item *astisub.Item, model Model) string {
@@ -101,10 +137,10 @@ func generateFilename(item *astisub.Item, model Model) string {
 	return fmt.Sprintf("%04d-%s-%s.%X.mp3", item.Index, model.name, dialog, checksum[:2])
 }
 
-func generateVoiceLine(client *elevenlabs.Client, item *Item) {
+func generateVoiceLine(client *elevenlabs.Client, item *Item) AudioFile {
 	if _, err := os.Stat(item.Path); err == nil {
 		log.Printf("Already spoke (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
-		return
+		return AudioFile{Path: item.Path, Offset: item.Sub.StartAt, Channel: item.Model.offset}
 	}
 
 	log.Printf("Speaking (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
@@ -122,10 +158,17 @@ func generateVoiceLine(client *elevenlabs.Client, item *Item) {
 		log.Fatal(err)
 	}
 	log.Printf("Wrote %s\n", item.Path)
+
+	return AudioFile{Path: item.Path, Offset: item.Sub.StartAt, Channel: item.Model.offset}
 }
 
-func combineAudioFiles(files []AudioFile, outputPath string, numChannels int) error {
+func combineAudioFiles(files []AudioFile, outputPath string) error {
 	const sampleRate = 44100
+
+	numChannels := 0
+	for _, file := range files {
+		numChannels = max(numChannels, file.Channel+1)
+	}
 
 	out, err := os.Create(outputPath)
 	if err != nil {
@@ -205,63 +248,27 @@ func combineAudioFiles(files []AudioFile, outputPath string, numChannels int) er
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Fatalf("Usage: %s <path to VTT file>", os.Args[0])
+		log.Fatalf("Usage: %s <path to subtitle file>", os.Args[0])
 	}
-	vttPath := os.Args[1]
+	subtitle := os.Args[1]
 
 	config, err := readConfig("config.yaml")
 	if err != nil {
 		log.Fatalf("Error reading config: %v", err)
 	}
-	modelChannels := buildModelChannelMap(config)
 
-	subs, err := parseSubtitle(vttPath)
-	if err != nil {
-		log.Fatalf("Error parsing VTT file: %v", err)
-	}
-	realDir, _ := filepath.Abs(filepath.Dir(vttPath))
-
-	var items = make([]Item, 0)
-	for i, sub := range subs.Items {
-		var model Model
-		sub.Index = i + 1
-		if len(sub.Comments) > 0 {
-			model = Model{name: config.Models[sub.Comments[0]].Name, model: config.Models[sub.Comments[0]].Model, offset: modelChannels[sub.Comments[0]]}
-		} else {
-			re := regexp.MustCompile(`\[(.*?)\]\s*(.+)`)
-			match := re.FindStringSubmatch(sub.String())
-			if len(match) > 1 {
-				model = Model{name: config.Models[match[1]].Name, model: config.Models[match[1]].Model, offset: modelChannels[match[0]]}
-				sub.Lines[0].Items[0].Text = match[2]
-			} else {
-				model = Model{name: config.Default.Name, model: config.Default.Model, offset: 0}
-			}
-		}
-
-		path := filepath.Join(realDir, generateFilename(sub, model))
-		item := Item{
-			Sub:   sub,
-			Model: model,
-			Path:  path,
-		}
-
-		items = append(items, item)
-	}
+	items := parseSubtitle(config, subtitle)
 
 	// TODO print items here in a readable format for debugging
 
-	// Generate voice lines for each item, skipping those that have already been generated
 	client := elevenlabs.NewClient(context.Background(), config.AuthKey, 30*time.Second)
 	audioFiles := make([]AudioFile, 0)
 	for _, item := range items {
-		generateVoiceLine(client, &item)
-		audioFiles = append(audioFiles, AudioFile{Path: item.Path, Offset: item.Sub.StartAt, Channel: item.Model.offset})
+		audioFiles = append(audioFiles, generateVoiceLine(client, &item))
 	}
 
-	// Write the final MP3 file
-	outputPath := strings.TrimSuffix(vttPath, filepath.Ext(vttPath)) + ".wav"
-
-	if err := combineAudioFiles(audioFiles, outputPath, len(modelChannels)); err != nil {
+	outputPath := strings.TrimSuffix(subtitle, filepath.Ext(subtitle)) + ".wav"
+	if err := combineAudioFiles(audioFiles, outputPath); err != nil {
 		log.Fatalf("Error writing final audio track: %v", err)
 	}
 	log.Printf("Final audio track written to %s\n", outputPath)
