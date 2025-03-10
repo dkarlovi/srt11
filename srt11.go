@@ -101,7 +101,7 @@ func parseSubtitle(config *Config, filename string) []Item {
 			re := regexp.MustCompile(`\[(.*?)\]\s*(.+)`)
 			match := re.FindStringSubmatch(sub.String())
 			if len(match) > 1 {
-				model = Model{name: config.Models[match[1]].Name, model: config.Models[match[1]].Model, offset: modelChannels[match[0]]}
+				model = Model{name: config.Models[match[1]].Name, model: config.Models[match[1]].Model, offset: modelChannels[match[1]]}
 				sub.Lines[0].Items[0].Text = match[2]
 			} else {
 				model = Model{name: config.Default.Name, model: config.Default.Model, offset: 0}
@@ -167,8 +167,9 @@ func combineAudioFiles(files []AudioFile, outputPath string) error {
 
 	numChannels := 0
 	for _, file := range files {
-		numChannels = max(numChannels, file.Channel+1)
+		numChannels = max(numChannels, file.Channel)
 	}
+	numChannels++
 
 	out, err := os.Create(outputPath)
 	if err != nil {
