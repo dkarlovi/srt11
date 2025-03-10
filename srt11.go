@@ -54,63 +54,68 @@ type AudioFile struct {
 
 func combineAudioFiles(files []AudioFile, outputPath string, numChannels int) error {
 	const sampleRate = 44100
-	const bytesPerSample = 2
 
-	// Create output file
 	out, err := os.Create(outputPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create output file: %w", err)
 	}
 	defer out.Close()
 
-	// Calculate total length
-	var totalLength int
-	for _, file := range files {
-		f, err := os.Open(file.Path)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-
-		decoder, err := mp3.NewDecoder(f)
-		if err != nil {
-			return err
-		}
-		offsetBytes := int(file.Offset.Seconds() * float64(sampleRate) * float64(numChannels) * float64(bytesPerSample))
-		totalLength = max(totalLength, offsetBytes+int(decoder.Length()))
-	}
-
-	// Create WAV encoder
 	enc := wav.NewEncoder(out, sampleRate, 16, numChannels, 1)
 	defer enc.Close()
 
-	// Process audio data
-	samples := make([]int, totalLength/bytesPerSample)
+	// Calculate total duration to pre-allocate buffer
+	var maxEndTime time.Duration
 	for _, file := range files {
 		f, err := os.Open(file.Path)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to open file %s: %w", file.Path, err)
+		}
+		decoder, err := mp3.NewDecoder(f)
+		if err != nil {
+			f.Close()
+			return fmt.Errorf("failed to create decoder for %s: %w", file.Path, err)
+		}
+		endTime := file.Offset + time.Duration(float64(decoder.Length())/float64(decoder.SampleRate())*float64(time.Second))
+		if endTime > maxEndTime {
+			maxEndTime = endTime
+		}
+		f.Close()
+	}
+
+	totalSamples := int(maxEndTime.Seconds()*float64(sampleRate)) * numChannels
+	mixBuffer := &audio.IntBuffer{
+		Format: &audio.Format{
+			NumChannels: numChannels,
+			SampleRate:  sampleRate,
+		},
+		Data:           make([]int, totalSamples),
+		SourceBitDepth: 16,
+	}
+
+	// Mix each file into the buffer at its offset
+	for _, file := range files {
+		f, err := os.Open(file.Path)
+		if err != nil {
+			return fmt.Errorf("failed to open file %s: %w", file.Path, err)
 		}
 		defer f.Close()
 
 		decoder, err := mp3.NewDecoder(f)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to create decoder for %s: %w", file.Path, err)
 		}
 
-		offsetSamples := int(file.Offset.Seconds() * float64(sampleRate) * float64(numChannels))
-		buf := make([]byte, 4096)
-		written := offsetSamples
-
+		offsetSamples := int(file.Offset.Seconds()*float64(sampleRate)) * numChannels
+		tmpBuf := make([]byte, 4096)
 		for {
-			n, err := decoder.Read(buf)
+			n, err := decoder.Read(tmpBuf)
 			if n > 0 {
-				// Convert bytes to samples directly
 				for i := 0; i < n-1; i += 2 {
-					if written < len(samples) {
-						sample := int(int16(buf[i]) | int16(buf[i+1])<<8)
-						samples[written] = sample
-						written++
+					if offsetSamples < len(mixBuffer.Data) {
+						sample := int(int16(tmpBuf[i]) | int16(tmpBuf[i+1])<<8)
+						mixBuffer.Data[offsetSamples] += sample // Mix by adding
+						offsetSamples++
 					}
 				}
 			}
@@ -118,20 +123,12 @@ func combineAudioFiles(files []AudioFile, outputPath string, numChannels int) er
 				break
 			}
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to read audio data: %w", err)
 			}
 		}
 	}
 
-	buf := &audio.IntBuffer{
-		Format: &audio.Format{
-			NumChannels: numChannels,
-			SampleRate:  sampleRate,
-		},
-		Data:           samples,
-		SourceBitDepth: 16,
-	}
-	return enc.Write(buf)
+	return enc.Write(mixBuffer)
 }
 
 func readConfig(filename string) (*Config, error) {
