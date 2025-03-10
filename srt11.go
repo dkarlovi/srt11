@@ -52,6 +52,62 @@ type AudioFile struct {
 	Channel int
 }
 
+func readConfig(filename string) (*Config, error) {
+	data, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+	var config Config
+	err = yaml.Unmarshal(data, &config)
+	if err != nil {
+		return nil, err
+	}
+	return &config, nil
+}
+
+func parseSubtitle(filename string) (*astisub.Subtitles, error) {
+	return astisub.OpenFile(filename)
+}
+
+func generateFilename(item *astisub.Item, model Model) string {
+	re := regexp.MustCompile(`[,.!?'<>:"/\\|?*\x00-\x1F]`)
+	dialog := re.ReplaceAllString(item.String(), "")
+	dialog = strings.ToLower(dialog)
+	dialog = strings.Replace(dialog, " ", "_", -1)
+	dialog = strings.TrimSpace(dialog)
+
+	if len(dialog) > 50 {
+		dialog = dialog[:50]
+	}
+
+	checksum := md5.Sum([]byte(model.name + dialog))
+
+	return fmt.Sprintf("%04d-%s-%s.%X.mp3", item.Index, model.name, dialog, checksum[:2])
+}
+
+func generateVoiceLine(client *elevenlabs.Client, item *Item) {
+	if _, err := os.Stat(item.Path); err == nil {
+		log.Printf("Already spoke (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
+		return
+	}
+
+	log.Printf("Speaking (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
+	ttsReq := elevenlabs.TextToSpeechRequest{
+		Text:    item.Sub.String(),
+		ModelID: "eleven_multilingual_v2",
+	}
+
+	audio, err := client.TextToSpeech(item.Model.model, ttsReq)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := os.WriteFile(item.Path, audio, 0644); err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("Wrote %s\n", item.Path)
+}
+
 func combineAudioFiles(files []AudioFile, outputPath string, numChannels int) error {
 	const sampleRate = 44100
 
@@ -131,62 +187,6 @@ func combineAudioFiles(files []AudioFile, outputPath string, numChannels int) er
 	return enc.Write(mixBuffer)
 }
 
-func readConfig(filename string) (*Config, error) {
-	data, err := ioutil.ReadFile(filename)
-	if err != nil {
-		return nil, err
-	}
-	var config Config
-	err = yaml.Unmarshal(data, &config)
-	if err != nil {
-		return nil, err
-	}
-	return &config, nil
-}
-
-func parseVTT(filename string) (*astisub.Subtitles, error) {
-	return astisub.OpenFile(filename)
-}
-
-func generateFilename(item *astisub.Item, model Model) string {
-	re := regexp.MustCompile(`[,.!?'<>:"/\\|?*\x00-\x1F]`)
-	dialog := re.ReplaceAllString(item.String(), "")
-	dialog = strings.ToLower(dialog)
-	dialog = strings.Replace(dialog, " ", "_", -1)
-	dialog = strings.TrimSpace(dialog)
-
-	if len(dialog) > 50 {
-		dialog = dialog[:50]
-	}
-
-	checksum := md5.Sum([]byte(model.name + dialog))
-
-	return fmt.Sprintf("%04d-%s-%s.%X.mp3", item.Index, model.name, dialog, checksum[:2])
-}
-
-func generateVoiceLine(client *elevenlabs.Client, item *Item) {
-	if _, err := os.Stat(item.Path); err == nil {
-		log.Printf("Already spoke (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
-		return
-	}
-
-	log.Printf("Speaking (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
-	ttsReq := elevenlabs.TextToSpeechRequest{
-		Text:    item.Sub.String(),
-		ModelID: "eleven_multilingual_v2",
-	}
-
-	audio, err := client.TextToSpeech(item.Model.model, ttsReq)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	if err := os.WriteFile(item.Path, audio, 0644); err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("Wrote %s\n", item.Path)
-}
-
 func main() {
 	if len(os.Args) < 2 {
 		log.Fatalf("Usage: %s <path to VTT file>", os.Args[0])
@@ -198,7 +198,7 @@ func main() {
 		log.Fatalf("Error reading config: %v", err)
 	}
 
-	subs, err := parseVTT(vttPath)
+	subs, err := parseSubtitle(vttPath)
 	if err != nil {
 		log.Fatalf("Error parsing VTT file: %v", err)
 	}
