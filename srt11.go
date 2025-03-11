@@ -93,7 +93,9 @@ func parseSubtitleFile(config *Config, path string) []Item {
 	for i, sub := range subs.Items {
 		var model Model
 		sub.Index = i + 1
-		if len(sub.Comments) > 0 {
+		if sub.Lines[0].VoiceName != "" {
+			model = Model{name: config.Models[sub.Lines[0].VoiceName].Name, model: config.Models[sub.Lines[0].VoiceName].Model, offset: modelChannels[sub.Lines[0].VoiceName]}
+		} else if len(sub.Comments) > 0 {
 			model = Model{name: config.Models[sub.Comments[0]].Name, model: config.Models[sub.Comments[0]].Model, offset: modelChannels[sub.Comments[0]]}
 		} else {
 			re := regexp.MustCompile(`\[(.*?)\]\s*(.+)`)
