@@ -206,13 +206,12 @@ func combineAudioFiles(files []AudioFile, outputPath string) error {
 		SourceBitDepth: 16,
 	}
 
-	// Mix each file into the buffer at its offset
 	for _, file := range files {
 		f, err := os.Open(file.Path)
+		defer f.Close()
 		if err != nil {
 			return fmt.Errorf("failed to open file %s: %w", file.Path, err)
 		}
-		defer f.Close()
 
 		decoder, err := mp3.NewDecoder(f)
 		if err != nil {
