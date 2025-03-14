@@ -177,7 +177,6 @@ func combineAudioFiles(files []AudioFile, outputPath string) error {
 		numChannels = max(numChannels, file.Channel+1)
 	}
 
-	// Calculate total duration to pre-allocate buffer
 	var maxEndTime time.Duration
 	for _, file := range files {
 		f, err := os.Open(file.Path)
@@ -189,13 +188,15 @@ func combineAudioFiles(files []AudioFile, outputPath string) error {
 		if err != nil {
 			return fmt.Errorf("failed to create decoder for %s: %w", file.Path, err)
 		}
-		endTime := file.Offset + time.Duration(float64(decoder.Length())/float64(decoder.SampleRate())*float64(time.Second))
+		duration := float64(decoder.Length()) / (2 * float64(decoder.SampleRate()))
+		endTime := file.Offset + time.Duration(duration*float64(time.Second))
 		if endTime > maxEndTime {
 			maxEndTime = endTime
 		}
 	}
 
-	totalSamples := int(maxEndTime.Seconds()*float64(sampleRate)) * numChannels
+	totalFrames := int(maxEndTime.Seconds() * float64(sampleRate))
+	totalSamples := totalFrames * numChannels
 	mixBuffer := &audio.IntBuffer{
 		Format: &audio.Format{
 			NumChannels: numChannels,
