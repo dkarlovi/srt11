@@ -171,6 +171,7 @@ func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) []AudioF
 
 func combineAudioFiles(files []AudioFile, outputPath string) error {
 	const sampleRate = 44100
+	const bitDepth = 16
 
 	numChannels := 0
 	for _, file := range files {
@@ -203,7 +204,7 @@ func combineAudioFiles(files []AudioFile, outputPath string) error {
 			SampleRate:  sampleRate,
 		},
 		Data:           make([]int, totalSamples),
-		SourceBitDepth: 16,
+		SourceBitDepth: bitDepth,
 	}
 
 	for _, file := range files {
@@ -246,7 +247,7 @@ func combineAudioFiles(files []AudioFile, outputPath string) error {
 	}
 	defer out.Close()
 
-	enc := wav.NewEncoder(out, sampleRate, 16, numChannels, 1)
+	enc := wav.NewEncoder(out, sampleRate, bitDepth, numChannels, 1)
 	defer enc.Close()
 
 	return enc.Write(mixBuffer)
