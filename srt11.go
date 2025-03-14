@@ -174,9 +174,8 @@ func combineAudioFiles(files []AudioFile, outputPath string) error {
 
 	numChannels := 0
 	for _, file := range files {
-		numChannels = max(numChannels, file.Channel)
+		numChannels = max(numChannels, file.Channel+1)
 	}
-	numChannels++
 
 	// Calculate total duration to pre-allocate buffer
 	var maxEndTime time.Duration
