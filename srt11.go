@@ -108,7 +108,7 @@ func parseSubtitleFile(config *Config, path string) []Item {
 			}
 		}
 
-		path := filepath.Join(realDir, generateFilename(sub, model))
+		path := filepath.Join(realDir, generateFilename(sub, model, ""))
 		item := Item{
 			Sub:   sub,
 			Model: model,
@@ -121,7 +121,7 @@ func parseSubtitleFile(config *Config, path string) []Item {
 	return items
 }
 
-func generateFilename(item *astisub.Item, model Model) string {
+func generateFilename(item *astisub.Item, model Model, id string) string {
 	re := regexp.MustCompile(`[,.!?'<>:"/\\|?*\x00-\x1F]`)
 	dialog := re.ReplaceAllString(item.String(), "")
 	dialog = strings.ToLower(dialog)
@@ -134,7 +134,7 @@ func generateFilename(item *astisub.Item, model Model) string {
 
 	checksum := md5.Sum([]byte(model.name + dialog))
 
-	return fmt.Sprintf("%04d-%s-%s.%X.mp3", item.Index, model.name, dialog, checksum[:2])
+	return fmt.Sprintf("%04d-%s-%s.%X.%s.mp3", item.Index, model.name, dialog, checksum[:2], id)
 }
 
 func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) []AudioFile {
@@ -149,11 +149,13 @@ func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) []AudioF
 
 		log.Printf("Speaking (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
 		ttsReq := elevenlabs.TextToSpeechRequest{
-			Text:    item.Sub.String(),
-			ModelID: "eleven_multilingual_v2",
+			Text:               item.Sub.String(),
+			ModelID:            "eleven_multilingual_v2",
+			PreviousRequestIds: make([]string, 0),
 		}
 
-		speech, err := client.TextToSpeech(item.Model.model, ttsReq)
+		speech, id, err := client.TextToSpeechWithRequestID(item.Model.model, ttsReq)
+		log.Print(id)
 		if err != nil {
 			log.Fatal(err)
 		}
