@@ -40,10 +40,15 @@ type Model struct {
 	offset int
 }
 
+type Path struct {
+	Path     string
+	Template string
+}
+
 type Item struct {
 	Sub   *astisub.Item
 	Model Model
-	Path  string
+	Path  Path
 }
 
 type AudioFile struct {
@@ -81,15 +86,33 @@ func buildModelChannelMap(config *Config) map[string]int {
 	return channels
 }
 
+func generatePathTemplate(root string, item *astisub.Item, model Model) Path {
+	re := regexp.MustCompile(`[,.!?'<>:"/\\|?*\x00-\x1F]`)
+	dialog := re.ReplaceAllString(item.String(), "")
+	dialog = strings.ToLower(dialog)
+	dialog = strings.Replace(dialog, " ", "_", -1)
+	dialog = strings.TrimSpace(dialog)
+
+	if len(dialog) > 50 {
+		dialog = dialog[:50]
+	}
+
+	// TODO: add more stuff to checksum here to ensure always fresh files
+	checksum := md5.Sum([]byte(model.model + dialog))
+	template := filepath.Join(root, fmt.Sprintf("%04d-%X-%s-%s.%%s.mp3", item.Index, checksum[:2], model.name, dialog))
+
+	return Path{Template: template}
+}
+
 func parseSubtitleFile(config *Config, path string) []Item {
 	subs, err := astisub.OpenFile(path)
 	if err != nil {
 		log.Fatalf("Error parsing VTT file: %v", err)
 	}
 
-	realDir, _ := filepath.Abs(filepath.Dir(path))
 	modelChannels := buildModelChannelMap(config)
 	items := make([]Item, 0)
+	root, _ := filepath.Abs(filepath.Dir(path))
 	for i, sub := range subs.Items {
 		var model Model
 		sub.Index = i + 1
@@ -108,11 +131,10 @@ func parseSubtitleFile(config *Config, path string) []Item {
 			}
 		}
 
-		path := filepath.Join(realDir, generateFilename(sub, model, ""))
 		item := Item{
 			Sub:   sub,
 			Model: model,
-			Path:  path,
+			Path:  generatePathTemplate(root, sub, model),
 		}
 
 		items = append(items, item)
@@ -121,29 +143,14 @@ func parseSubtitleFile(config *Config, path string) []Item {
 	return items
 }
 
-func generateFilename(item *astisub.Item, model Model, id string) string {
-	re := regexp.MustCompile(`[,.!?'<>:"/\\|?*\x00-\x1F]`)
-	dialog := re.ReplaceAllString(item.String(), "")
-	dialog = strings.ToLower(dialog)
-	dialog = strings.Replace(dialog, " ", "_", -1)
-	dialog = strings.TrimSpace(dialog)
-
-	if len(dialog) > 50 {
-		dialog = dialog[:50]
-	}
-
-	checksum := md5.Sum([]byte(model.name + dialog))
-
-	return fmt.Sprintf("%04d-%s-%s.%X.%s.mp3", item.Index, model.name, dialog, checksum[:2], id)
-}
-
 func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) []AudioFile {
 	audioFiles := make([]AudioFile, 0)
 	for _, item := range items {
-		if _, err := os.Stat(item.Path); err == nil {
+		// we check whether the file exists using a glob
+		glob := fmt.Sprintf(item.Path.Template, "*")
+		if files, err := filepath.Glob(glob); err == nil && len(files) > 0 {
 			log.Printf("Already spoke (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
-			audioFiles = append(audioFiles, AudioFile{Path: item.Path, Offset: item.Sub.StartAt, Channel: item.Model.offset})
-
+			audioFiles = append(audioFiles, AudioFile{Path: files[0], Offset: item.Sub.StartAt, Channel: item.Model.offset})
 			continue
 		}
 
@@ -155,23 +162,23 @@ func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) []AudioF
 		}
 
 		speech, id, err := client.TextToSpeechWithRequestID(item.Model.model, ttsReq)
-		log.Print(id)
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		if err := os.WriteFile(item.Path, speech, 0644); err != nil {
+		path := fmt.Sprintf(item.Path.Template, id)
+		if err := os.WriteFile(path, speech, 0644); err != nil {
 			log.Fatal(err)
 		}
-		log.Printf("Wrote %s\n", item.Path)
+		log.Printf("Wrote %s\n", path)
 
-		audioFiles = append(audioFiles, AudioFile{Path: item.Path, Offset: item.Sub.StartAt, Channel: item.Model.offset})
+		audioFiles = append(audioFiles, AudioFile{Path: path, Offset: item.Sub.StartAt, Channel: item.Model.offset})
 	}
 
 	return audioFiles
 }
 
-func combineAudioFiles(files []AudioFile, outputPath string) error {
+func generateFinalAudioFile(files []AudioFile, outputPath string) error {
 	const sampleRate = 44100
 	const bitDepth = 16
 
@@ -270,11 +277,13 @@ func main() {
 
 	// TODO print items here in a readable format for debugging
 
+	// we can ask an interactive question here to confirm the items are correct and whether to proceed or not with the TTS
+
 	client := elevenlabs.NewClient(context.Background(), config.AuthKey, 30*time.Second)
 	audioFiles := generateMissingVoiceLines(client, items)
 
 	outputPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".wav"
-	if err := combineAudioFiles(audioFiles, outputPath); err != nil {
+	if err := generateFinalAudioFile(audioFiles, outputPath); err != nil {
 		log.Fatalf("Error writing final audio track: %v", err)
 	}
 	log.Printf("Final audio track written to %s\n", outputPath)
