@@ -43,6 +43,7 @@ type Model struct {
 type Path struct {
 	Path     string
 	Template string
+	Id       string
 }
 
 type Item struct {
@@ -101,6 +102,16 @@ func generatePathTemplate(root string, item *astisub.Item, model Model) Path {
 	checksum := md5.Sum([]byte(model.model + dialog))
 	template := filepath.Join(root, fmt.Sprintf("%04d-%X-%s-%s.%%s.mp3", item.Index, checksum[:2], model.name, dialog))
 
+	glob := fmt.Sprintf(template, "*")
+	if files, err := filepath.Glob(glob); err == nil && len(files) > 0 {
+		// found the previously generated file, extract the ID out of it
+		re := regexp.MustCompile(`([^.]+).mp3$`)
+		match := re.FindStringSubmatch(filepath.Base(files[0]))
+		if len(match) > 1 {
+			return Path{Path: files[0], Template: template, Id: match[1]}
+		}
+	}
+
 	return Path{Template: template}
 }
 
@@ -115,7 +126,7 @@ func parseSubtitleFile(config *Config, path string) []Item {
 	root, _ := filepath.Abs(filepath.Dir(path))
 	for i, sub := range subs.Items {
 		var model Model
-		sub.Index = i + 1
+		sub.Index = i
 		if sub.Lines[0].VoiceName != "" {
 			model = Model{name: config.Models[sub.Lines[0].VoiceName].Name, model: config.Models[sub.Lines[0].VoiceName].Model, offset: modelChannels[sub.Lines[0].VoiceName]}
 		} else if len(sub.Comments) > 0 {
@@ -146,19 +157,41 @@ func parseSubtitleFile(config *Config, path string) []Item {
 func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) []AudioFile {
 	audioFiles := make([]AudioFile, 0)
 	for _, item := range items {
-		// we check whether the file exists using a glob
-		glob := fmt.Sprintf(item.Path.Template, "*")
-		if files, err := filepath.Glob(glob); err == nil && len(files) > 0 {
+		if item.Path.Path != "" {
 			log.Printf("Already spoke (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
-			audioFiles = append(audioFiles, AudioFile{Path: files[0], Offset: item.Sub.StartAt, Channel: item.Model.offset})
+			audioFiles = append(audioFiles, AudioFile{Path: item.Path.Path, Offset: item.Sub.StartAt, Channel: item.Model.offset})
 			continue
+		}
+
+		previousRequestIds := make([]string, 0)
+		for i := item.Sub.Index - 1; i >= item.Sub.Index-3; i-- {
+			if i < 0 || items[i].Path.Id == "" {
+				continue
+			}
+			previousRequestIds = append(previousRequestIds, items[i].Path.Id)
+		}
+
+		nextRequestIds := make([]string, 0)
+		nextText := ""
+		for i := item.Sub.Index + 1; i <= item.Sub.Index+3; i++ {
+			if i >= len(items) {
+				continue
+			}
+			if items[i].Path.Id == "" {
+				nextText = items[i].Sub.String()
+				break
+			}
+
+			nextRequestIds = append(nextRequestIds, items[i].Path.Id)
 		}
 
 		log.Printf("Speaking (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
 		ttsReq := elevenlabs.TextToSpeechRequest{
 			Text:               item.Sub.String(),
 			ModelID:            "eleven_multilingual_v2",
-			PreviousRequestIds: make([]string, 0),
+			PreviousRequestIds: previousRequestIds,
+			NextRequestIds:     nextRequestIds,
+			NextText:           nextText,
 		}
 
 		speech, id, err := client.TextToSpeechWithRequestID(item.Model.model, ttsReq)
