@@ -2,6 +2,7 @@ auth_key: "sk_your_auth_key"
 default:
     model: "model_id"
     name: "Speaker name"
+    speed: 1.1
 models:
     # use by adding [Joe] in front of the text
     # or ass the first comment in VTT subtitles

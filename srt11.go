@@ -25,12 +25,14 @@ import (
 type Config struct {
 	AuthKey string `yaml:"auth_key"`
 	Default struct {
-		Model string `yaml:"model"`
-		Name  string `yaml:"name"`
+		Model string  `yaml:"model"`
+		Name  string  `yaml:"name"`
+		Speed float32 `yaml:"speed"`
 	} `yaml:"default"`
 	Models map[string]struct {
-		Model string `yaml:"model"`
-		Name  string `yaml:"name"`
+		Model string  `yaml:"model"`
+		Name  string  `yaml:"name"`
+		Speed float32 `yaml:"speed"`
 	} `yaml:"models"`
 }
 
@@ -38,6 +40,7 @@ type Model struct {
 	model  string
 	name   string
 	offset int
+	speed  float32
 }
 
 type Path struct {
@@ -93,13 +96,11 @@ func generatePathTemplate(root string, item *astisub.Item, model Model) Path {
 	dialog = strings.ToLower(dialog)
 	dialog = strings.Replace(dialog, " ", "_", -1)
 	dialog = strings.TrimSpace(dialog)
-
 	if len(dialog) > 50 {
 		dialog = dialog[:50]
 	}
 
-	// TODO: add more stuff to checksum here to ensure always fresh files
-	checksum := md5.Sum([]byte(model.model + dialog))
+	checksum := md5.Sum([]byte(model.model + fmt.Sprintf("%f", model.speed) + dialog))
 	template := filepath.Join(root, fmt.Sprintf("%X-%s-%s.%%s.mp3", checksum[:4], model.name, dialog))
 
 	glob := fmt.Sprintf(template, "*")
@@ -125,21 +126,27 @@ func parseSubtitleFile(config *Config, path string) []Item {
 	items := make([]Item, 0)
 	root, _ := filepath.Abs(filepath.Dir(path))
 	for i, sub := range subs.Items {
-		var model Model
 		sub.Index = i
+		var modelName string
 		if sub.Lines[0].VoiceName != "" {
-			model = Model{name: config.Models[sub.Lines[0].VoiceName].Name, model: config.Models[sub.Lines[0].VoiceName].Model, offset: modelChannels[sub.Lines[0].VoiceName]}
+			modelName = sub.Lines[0].VoiceName
 		} else if len(sub.Comments) > 0 {
-			model = Model{name: config.Models[sub.Comments[0]].Name, model: config.Models[sub.Comments[0]].Model, offset: modelChannels[sub.Comments[0]]}
+			modelName = sub.Comments[0]
 		} else {
 			re := regexp.MustCompile(`\[(.*?)\]\s*(.+)`)
 			match := re.FindStringSubmatch(sub.String())
 			if len(match) > 1 {
-				model = Model{name: config.Models[match[1]].Name, model: config.Models[match[1]].Model, offset: modelChannels[match[1]]}
+				modelName = match[1]
 				sub.Lines[0].Items[0].Text = match[2]
-			} else {
-				model = Model{name: config.Default.Name, model: config.Default.Model, offset: 0}
 			}
+		}
+
+		var model Model
+		if modelName != "" {
+			modelConfig := config.Models[modelName]
+			model = Model{name: modelConfig.Name, model: modelConfig.Model, offset: modelChannels[modelName], speed: modelConfig.Speed}
+		} else {
+			model = Model{name: config.Default.Name, model: config.Default.Model, offset: 0, speed: config.Default.Speed}
 		}
 
 		item := Item{
@@ -187,6 +194,10 @@ func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) []AudioF
 
 		log.Printf("Speaking (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
 		ttsReq := elevenlabs.TextToSpeechRequest{
+			VoiceSettings: &elevenlabs.VoiceSettings{
+				SpeakerBoost: true,
+				Speed:        item.Model.speed,
+			},
 			Text:               item.Sub.String(),
 			ModelID:            "eleven_multilingual_v2",
 			PreviousRequestIds: previousRequestIds,
