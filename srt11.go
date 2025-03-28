@@ -60,6 +60,7 @@ type AudioFile struct {
 	Duration time.Duration
 	Offset   time.Duration
 	Channel  int
+	Overlap  time.Duration
 }
 
 func readConfig(filename string) (*Config, error) {
@@ -346,9 +347,23 @@ func main() {
 	client := elevenlabs.NewClient(context.Background(), config.AuthKey, 30*time.Second)
 	audioFiles := generateMissingVoiceLines(client, items)
 
-	for _, file := range audioFiles {
+	overlaps := make([]AudioFile, 0)
+	for i, file := range audioFiles {
+		fileEndAt := file.Offset + file.Duration
+		var overlap bool
+		var overlapText string
+		if i < len(audioFiles)-1 {
+			nextFile := audioFiles[i+1]
+			overlap = fileEndAt > nextFile.Offset
+			file.Overlap = fileEndAt - nextFile.Offset
+			if overlap {
+				overlapText = fmt.Sprintf(" (OVERLAP %s)", file.Overlap.Round(time.Millisecond))
+				overlaps = append(overlaps, file)
+			}
+		}
+
 		fmt.Printf(
-			"#%03d\n%s\nSpeaker:  %s, speed: %.2f\nSubtitle: %s --> %s (duration %s)\nAudio:    %s --> %s (duration %s)\nPath:     %s\n\n",
+			"#%03d\n%s\nSpeaker:  %s, speed: %.2f\nSubtitle: %s --> %s (duration %s)\nAudio:    %s --> %s (duration %s)%s\nPath:     %s\n\n",
 			file.Item.Sub.Index+1,
 			file.Item.Sub.String(),
 			file.Item.Model.name,
@@ -357,10 +372,20 @@ func main() {
 			file.Item.Sub.EndAt.Round(time.Millisecond),
 			(file.Item.Sub.EndAt - file.Item.Sub.StartAt).Round(time.Millisecond),
 			file.Offset.Round(time.Millisecond),
-			(file.Offset + file.Duration).Round(time.Millisecond),
+			fileEndAt.Round(time.Millisecond),
 			file.Duration.Round(time.Millisecond),
+			overlapText,
 			file.Item.Path.Path,
 		)
+	}
+
+	if len(overlaps) > 0 {
+		fmt.Println("Overlaps detected:")
+		for _, overlap := range overlaps {
+			fmt.Printf("#%03d %s\n%s\n\n", overlap.Item.Sub.Index+1, overlap.Overlap.Round(time.Millisecond), overlap.Item.Sub.String())
+		}
+		fmt.Println("Fix and rerun the script to generate the final audio file.")
+		os.Exit(1)
 	}
 
 	outputPath := strings.TrimSuffix(path, filepath.Ext(path)) + "_" + time.Now().Format("2006-01-02-15-04-05") + ".wav"
