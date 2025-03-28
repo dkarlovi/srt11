@@ -74,7 +74,7 @@ func readConfig(filename string) (*Config, error) {
 	return &config, nil
 }
 
-func buildModelChannelMap(config *Config) map[string]int {
+func generateModelChannelMap(config *Config) map[string]int {
 	channels := make(map[string]int)
 	// Default model always goes to channel 0
 	channels[config.Default.Name] = 0
@@ -122,7 +122,7 @@ func parseSubtitleFile(config *Config, path string) []Item {
 		log.Fatalf("Error parsing VTT file: %v", err)
 	}
 
-	modelChannels := buildModelChannelMap(config)
+	modelChannels := generateModelChannelMap(config)
 	items := make([]Item, 0)
 	root, _ := filepath.Abs(filepath.Dir(path))
 	for i, sub := range subs.Items {
