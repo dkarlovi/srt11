@@ -167,11 +167,16 @@ func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) []AudioF
 	for _, item := range items {
 		if item.Path.Path != "" {
 			log.Printf("Already spoke (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
+			duration, err := readAudioFileDuration(item.Path.Path)
+			if err != nil {
+				log.Printf("Error reading audio file %s duration: %v\n", item.Path.Path, err)
+				continue
+			}
 			audioFiles = append(audioFiles, AudioFile{
 				Item:     item,
 				Offset:   item.Sub.StartAt,
 				Channel:  item.Model.offset,
-				Duration: 0,
+				Duration: duration,
 			})
 			continue
 		}
@@ -223,11 +228,17 @@ func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) []AudioF
 		log.Printf("Wrote %s\n", path)
 		item.Path.Path = path
 
+		duration, err := readAudioFileDuration(path)
+		if err != nil {
+			log.Printf("Error reading audio file %s duration: %v\n", item.Path.Path, err)
+			continue
+		}
+
 		audioFiles = append(audioFiles, AudioFile{
 			Item:     item,
 			Offset:   item.Sub.StartAt,
 			Channel:  item.Model.offset,
-			Duration: 0,
+			Duration: duration,
 		})
 	}
 
@@ -261,14 +272,7 @@ func generateFinalAudioFile(files []AudioFile, outputPath string) error {
 
 	var maxEndTime time.Duration
 	for _, file := range files {
-		path := file.Item.Path.Path
-		duration, err := readAudioFileDuration(file.Item.Path.Path)
-		if err != nil {
-			return fmt.Errorf("failed to read audio file %s: %w", path, err)
-		}
-
-		endTime := file.Offset + duration
-		maxEndTime = max(maxEndTime, endTime)
+		maxEndTime = max(maxEndTime, file.Offset+file.Duration)
 	}
 
 	totalFrames := int(maxEndTime.Seconds() * float64(sampleRate))
