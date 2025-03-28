@@ -354,7 +354,7 @@ func main() {
 		var overlapText string
 		if i < len(audioFiles)-1 {
 			nextFile := audioFiles[i+1]
-			overlap = fileEndAt > nextFile.Offset
+			overlap = fileEndAt > nextFile.Offset && file.Item.Model.model == nextFile.Item.Model.model
 			file.Overlap = fileEndAt - nextFile.Offset
 			if overlap {
 				overlapText = fmt.Sprintf(" (OVERLAP %s)", file.Overlap.Round(time.Millisecond))
