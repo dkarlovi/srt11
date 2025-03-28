@@ -56,9 +56,10 @@ type Item struct {
 }
 
 type AudioFile struct {
-	Path    string
-	Offset  time.Duration
-	Channel int
+	Item     Item
+	Duration time.Duration
+	Offset   time.Duration
+	Channel  int
 }
 
 func readConfig(filename string) (*Config, error) {
@@ -166,7 +167,12 @@ func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) []AudioF
 	for _, item := range items {
 		if item.Path.Path != "" {
 			log.Printf("Already spoke (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
-			audioFiles = append(audioFiles, AudioFile{Path: item.Path.Path, Offset: item.Sub.StartAt, Channel: item.Model.offset})
+			audioFiles = append(audioFiles, AudioFile{
+				Item:     item,
+				Offset:   item.Sub.StartAt,
+				Channel:  item.Model.offset,
+				Duration: 0,
+			})
 			continue
 		}
 
@@ -215,8 +221,14 @@ func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) []AudioF
 			log.Fatal(err)
 		}
 		log.Printf("Wrote %s\n", path)
+		item.Path.Path = path
 
-		audioFiles = append(audioFiles, AudioFile{Path: path, Offset: item.Sub.StartAt, Channel: item.Model.offset})
+		audioFiles = append(audioFiles, AudioFile{
+			Item:     item,
+			Offset:   item.Sub.StartAt,
+			Channel:  item.Model.offset,
+			Duration: 0,
+		})
 	}
 
 	return audioFiles
@@ -233,14 +245,15 @@ func generateFinalAudioFile(files []AudioFile, outputPath string) error {
 
 	var maxEndTime time.Duration
 	for _, file := range files {
-		f, err := os.Open(file.Path)
+		path := file.Item.Path.Path
+		f, err := os.Open(path)
 		defer f.Close()
 		if err != nil {
-			return fmt.Errorf("failed to open file %s: %w", file.Path, err)
+			return fmt.Errorf("failed to open file %s: %w", path, err)
 		}
 		decoder, err := mp3.NewDecoder(f)
 		if err != nil {
-			return fmt.Errorf("failed to create decoder for %s: %w", file.Path, err)
+			return fmt.Errorf("failed to create decoder for %s: %w", path, err)
 		}
 		duration := float64(decoder.Length()) / (2 * float64(decoder.SampleRate()))
 		endTime := file.Offset + time.Duration(duration*float64(time.Second))
@@ -261,15 +274,16 @@ func generateFinalAudioFile(files []AudioFile, outputPath string) error {
 	}
 
 	for _, file := range files {
-		f, err := os.Open(file.Path)
+		path := file.Item.Path.Path
+		f, err := os.Open(path)
 		defer f.Close()
 		if err != nil {
-			return fmt.Errorf("failed to open file %s: %w", file.Path, err)
+			return fmt.Errorf("failed to open file %s: %w", path, err)
 		}
 
 		decoder, err := mp3.NewDecoder(f)
 		if err != nil {
-			return fmt.Errorf("failed to create decoder for %s: %w", file.Path, err)
+			return fmt.Errorf("failed to create decoder for %s: %w", path, err)
 		}
 
 		offsetSamples := int(file.Offset.Seconds()*float64(sampleRate)) * numChannels
