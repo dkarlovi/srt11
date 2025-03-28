@@ -100,7 +100,7 @@ func generatePathTemplate(root string, item *astisub.Item, model Model) Path {
 
 	// TODO: add more stuff to checksum here to ensure always fresh files
 	checksum := md5.Sum([]byte(model.model + dialog))
-	template := filepath.Join(root, fmt.Sprintf("%04d-%X-%s-%s.%%s.mp3", item.Index, checksum[:2], model.name, dialog))
+	template := filepath.Join(root, fmt.Sprintf("%X-%s-%s.%%s.mp3", checksum[:4], model.name, dialog))
 
 	glob := fmt.Sprintf(template, "*")
 	if files, err := filepath.Glob(glob); err == nil && len(files) > 0 {
