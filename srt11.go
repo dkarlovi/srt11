@@ -254,7 +254,7 @@ func readAudioFileDuration(path string) (time.Duration, error) {
 		return 0, err
 	}
 
-	duration := float64(decoder.Length()) / (2 * float64(decoder.SampleRate()))
+	duration := float64(decoder.Length()) / (4 * float64(decoder.SampleRate()))
 	return time.Duration(duration * float64(time.Second)), nil
 }
 
