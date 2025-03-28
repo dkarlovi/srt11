@@ -353,12 +353,12 @@ func main() {
 			file.Item.Sub.String(),
 			file.Item.Model.name,
 			file.Item.Model.speed,
-			file.Item.Sub.StartAt,
-			file.Item.Sub.EndAt,
-			file.Item.Sub.EndAt-file.Item.Sub.StartAt,
-			file.Offset,
-			file.Offset+file.Duration,
-			file.Duration,
+			file.Item.Sub.StartAt.Round(time.Millisecond),
+			file.Item.Sub.EndAt.Round(time.Millisecond),
+			(file.Item.Sub.EndAt - file.Item.Sub.StartAt).Round(time.Millisecond),
+			file.Offset.Round(time.Millisecond),
+			(file.Offset + file.Duration).Round(time.Millisecond),
+			file.Duration.Round(time.Millisecond),
 			file.Item.Path.Path,
 		)
 	}
