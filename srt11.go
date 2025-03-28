@@ -315,7 +315,7 @@ func main() {
 	client := elevenlabs.NewClient(context.Background(), config.AuthKey, 30*time.Second)
 	audioFiles := generateMissingVoiceLines(client, items)
 
-	outputPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".wav"
+	outputPath := strings.TrimSuffix(path, filepath.Ext(path)) + "_" + time.Now().Format("2006-01-02-15-04-05") + ".wav"
 	if err := generateFinalAudioFile(audioFiles, outputPath); err != nil {
 		log.Fatalf("Error writing final audio track: %v", err)
 	}
