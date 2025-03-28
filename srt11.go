@@ -166,11 +166,9 @@ func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) []AudioF
 	audioFiles := make([]AudioFile, 0)
 	for _, item := range items {
 		if item.Path.Path != "" {
-			log.Printf("Already spoke (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
 			duration, err := readAudioFileDuration(item.Path.Path)
 			if err != nil {
-				log.Printf("Error reading audio file %s duration: %v\n", item.Path.Path, err)
-				continue
+				log.Fatalf("Error reading audio file %s duration: %v\n", item.Path.Path, err)
 			}
 			audioFiles = append(audioFiles, AudioFile{
 				Item:     item,
@@ -230,8 +228,7 @@ func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) []AudioF
 
 		duration, err := readAudioFileDuration(path)
 		if err != nil {
-			log.Printf("Error reading audio file %s duration: %v\n", item.Path.Path, err)
-			continue
+			log.Fatalf("Error reading audio file %s duration: %v\n", item.Path.Path, err)
 		}
 
 		audioFiles = append(audioFiles, AudioFile{
@@ -345,10 +342,6 @@ func main() {
 	}
 
 	items := parseSubtitleFile(config, path)
-
-	// TODO print items here in a readable format for debugging
-
-	// we can ask an interactive question here to confirm the items are correct and whether to proceed or not with the TTS
 
 	client := elevenlabs.NewClient(context.Background(), config.AuthKey, 30*time.Second)
 	audioFiles := generateMissingVoiceLines(client, items)
