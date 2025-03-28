@@ -234,6 +234,22 @@ func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) []AudioF
 	return audioFiles
 }
 
+func readAudioFileDuration(path string) (time.Duration, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	decoder, err := mp3.NewDecoder(f)
+	if err != nil {
+		return 0, err
+	}
+
+	duration := float64(decoder.Length()) / (2 * float64(decoder.SampleRate()))
+	return time.Duration(duration * float64(time.Second)), nil
+}
+
 func generateFinalAudioFile(files []AudioFile, outputPath string) error {
 	const sampleRate = 44100
 	const bitDepth = 16
@@ -246,20 +262,13 @@ func generateFinalAudioFile(files []AudioFile, outputPath string) error {
 	var maxEndTime time.Duration
 	for _, file := range files {
 		path := file.Item.Path.Path
-		f, err := os.Open(path)
-		defer f.Close()
+		duration, err := readAudioFileDuration(file.Item.Path.Path)
 		if err != nil {
-			return fmt.Errorf("failed to open file %s: %w", path, err)
+			return fmt.Errorf("failed to read audio file %s: %w", path, err)
 		}
-		decoder, err := mp3.NewDecoder(f)
-		if err != nil {
-			return fmt.Errorf("failed to create decoder for %s: %w", path, err)
-		}
-		duration := float64(decoder.Length()) / (2 * float64(decoder.SampleRate()))
-		endTime := file.Offset + time.Duration(duration*float64(time.Second))
-		if endTime > maxEndTime {
-			maxEndTime = endTime
-		}
+
+		endTime := file.Offset + duration
+		maxEndTime = max(maxEndTime, endTime)
 	}
 
 	totalFrames := int(maxEndTime.Seconds() * float64(sampleRate))
