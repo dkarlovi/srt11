@@ -102,7 +102,7 @@ func generatePathTemplate(root string, item *astisub.Item, model Model) Path {
 		dialog = dialog[:50]
 	}
 
-	checksum := md5.Sum([]byte(model.model + fmt.Sprintf("%f", model.speed) + dialog))
+	checksum := md5.Sum([]byte(model.model + fmt.Sprintf("%f", model.speed) + item.String()))
 	template := filepath.Join(root, fmt.Sprintf("%X-%s-%s.%%s.mp3", checksum[:4], model.name, dialog))
 
 	glob := fmt.Sprintf(template, "*")
