@@ -297,17 +297,23 @@ func generateFinalAudioFile(files []AudioFile, outputPath string) error {
 			return fmt.Errorf("failed to create decoder for %s: %w", path, err)
 		}
 
-		offsetSamples := int(file.Offset.Seconds()*float64(sampleRate)) * numChannels
+		startFrame := int(file.Offset.Seconds() * float64(sampleRate))
 		tmpBuf := make([]byte, 4096)
+		currentFrame := 0
 		for {
 			n, err := decoder.Read(tmpBuf)
 			if n > 0 {
-				for i := 0; i < n-1; i += 2 {
-					if offsetSamples < len(mixBuffer.Data) {
+				// Process samples in pairs of bytes (16-bit samples, 2 channels)
+				for i := 0; i < n-1; i += 4 {
+					frame := startFrame + (currentFrame / 4)
+					if frame < totalFrames {
 						sample := int(int16(tmpBuf[i]) | int16(tmpBuf[i+1])<<8)
-						mixBuffer.Data[offsetSamples] += sample // Mix by adding
-						offsetSamples++
+						pos := (frame * numChannels) + file.Channel
+						if pos < len(mixBuffer.Data) {
+							mixBuffer.Data[pos] += sample
+						}
 					}
+					currentFrame += 4
 				}
 			}
 			if err == io.EOF {
