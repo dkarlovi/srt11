@@ -11,6 +11,7 @@ import (
 
 	"github.com/haguro/elevenlabs-go"
 	"github.com/hajimehoshi/go-mp3"
+	"github.com/jessevdk/go-flags"
 	"gopkg.in/yaml.v2"
 	"io"
 	"io/ioutil"
@@ -21,6 +22,45 @@ import (
 	"strings"
 	"time"
 )
+
+// --- Colorizing output ---
+
+var (
+	colorReset  = "\033[0m"
+	colorGreen  = "\033[92m" // light green
+	colorYellow = "\033[93m" // bright yellow
+	colorRed    = "\033[91m"
+	colorBlue   = "\033[94m" // bright blue
+	colorCyan   = "\033[96m"
+	colorGray   = "\033[90m"
+)
+
+var tagColors = map[string]string{
+	"info":  colorGreen,
+	"time":  colorYellow,
+	"error": colorRed,
+	"warn":  colorBlue,
+	"note":  colorCyan,
+	"debug": colorGray,
+}
+
+// Go's regexp doesn't support backreferences, so match <tag>...</tag> and check tag equality in code.
+var tagRegex = regexp.MustCompile(`<([a-zA-Z]+)>(.*?)</([a-zA-Z]+)>`)
+
+func ColorizeTags(s string) string {
+	return tagRegex.ReplaceAllStringFunc(s, func(m string) string {
+		matches := tagRegex.FindStringSubmatch(m)
+		if len(matches) == 4 && matches[1] == matches[3] {
+			color, ok := tagColors[matches[1]]
+			if ok {
+				return color + matches[2] + colorReset
+			}
+		}
+		return m
+	})
+}
+
+// --- end colorizing output ---
 
 type Config struct {
 	AuthKey string `yaml:"auth_key"`
@@ -34,6 +74,7 @@ type Config struct {
 		Name  string  `yaml:"name"`
 		Speed float32 `yaml:"speed"`
 	} `yaml:"models"`
+	MergeLinesThresholdMs int `yaml:"merge_lines_threshold_ms"` // optional
 }
 
 type Model struct {
@@ -50,9 +91,10 @@ type Path struct {
 }
 
 type Item struct {
-	Sub   *astisub.Item
-	Model Model
-	Path  Path
+	Sub        *astisub.Item
+	Model      Model
+	Path       Path
+	MergedFrom []string // timings of merged-from lines
 }
 
 type AudioFile struct {
@@ -61,6 +103,21 @@ type AudioFile struct {
 	Offset   time.Duration
 	Channel  int
 	Overlap  time.Duration
+}
+
+type Options struct {
+	MergeLinesThresholdMs int    `short:"m" long:"merge-lines-threshold-ms" description:"Merge lines if same speaker and gap is below this threshold (ms)"`
+	ConfigPath            string `short:"c" long:"config" description:"Path to config YAML file" default:"config.yaml"`
+	Help                  bool   `short:"h" long:"help" description:"Show this help message"`
+	Positional            struct {
+		Path string `description:"Path to subtitle file" positional-arg-name:"path"`
+	} `positional-args:"yes"`
+}
+
+var opts Options
+
+func printHelp(parser *flags.Parser) {
+	parser.WriteHelp(os.Stdout)
 }
 
 func readConfig(filename string) (*Config, error) {
@@ -118,7 +175,7 @@ func generatePathTemplate(root string, item *astisub.Item, model Model) Path {
 	return Path{Template: template}
 }
 
-func parseSubtitleFile(config *Config, path string) []Item {
+func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs int) []Item {
 	subs, err := astisub.OpenFile(path)
 	if err != nil {
 		log.Fatalf("Error parsing VTT file: %v", err)
@@ -127,7 +184,96 @@ func parseSubtitleFile(config *Config, path string) []Item {
 	modelChannels := generateModelChannelMap(config)
 	items := make([]Item, 0)
 	root, _ := filepath.Abs(filepath.Dir(path))
-	for i, sub := range subs.Items {
+
+	// Merge logic
+	type mergedResult struct {
+		item       *astisub.Item
+		mergedFrom []string
+	}
+	mergedSubs := make([]mergedResult, 0)
+	i := 0
+	for i < len(subs.Items) {
+		cur := subs.Items[i]
+		// Determine speaker for current line
+		var curSpeaker string
+		if cur.Lines[0].VoiceName != "" {
+			curSpeaker = cur.Lines[0].VoiceName
+		} else if len(cur.Comments) > 0 {
+			curSpeaker = cur.Comments[0]
+		} else {
+			re := regexp.MustCompile(`\[(.*?)\]\s*(.+)`)
+			match := re.FindStringSubmatch(cur.String())
+			if len(match) > 1 {
+				curSpeaker = match[1]
+			}
+		}
+		// Prepare to merge into a single line
+		mergedText := cur.String()
+		mergedStart := cur.StartAt
+		mergedEnd := cur.EndAt
+		mergedVoiceName := cur.Lines[0].VoiceName
+		mergedComments := cur.Comments
+		mergedFrom := []string{
+			ColorizeTags(fmt.Sprintf("<time>%s</time> --> <time>%s</time> (duration <time>%s</time>) | <info>%s</info>",
+				cur.StartAt.Round(time.Millisecond),
+				cur.EndAt.Round(time.Millisecond),
+				(cur.EndAt - cur.StartAt).Round(time.Millisecond),
+				strings.TrimSpace(cur.String()),
+			)),
+		}
+		for {
+			// Try to merge with next lines if threshold is set
+			if mergeLinesThresholdMs > 0 && i+1 < len(subs.Items) {
+				next := subs.Items[i+1]
+				var nextSpeaker string
+				if next.Lines[0].VoiceName != "" {
+					nextSpeaker = next.Lines[0].VoiceName
+				} else if len(next.Comments) > 0 {
+					nextSpeaker = next.Comments[0]
+				} else {
+					re := regexp.MustCompile(`\[(.*?)\]\s*(.+)`)
+					match := re.FindStringSubmatch(next.String())
+					if len(match) > 1 {
+						nextSpeaker = match[1]
+					}
+				}
+				gap := next.StartAt - mergedEnd
+				if curSpeaker == nextSpeaker && gap.Milliseconds() >= 0 && gap.Milliseconds() <= int64(mergeLinesThresholdMs) {
+					// Merge: extend end time, concat text
+					mergedEnd = next.EndAt
+					mergedText = strings.TrimSpace(mergedText) + " " + strings.TrimSpace(next.String())
+					mergedFrom = append(mergedFrom, ColorizeTags(fmt.Sprintf("<time>%s</time> --> <time>%s</time> (duration <time>%s</time>) | <info>%s</info>",
+						next.StartAt.Round(time.Millisecond),
+						next.EndAt.Round(time.Millisecond),
+						(next.EndAt-next.StartAt).Round(time.Millisecond),
+						strings.TrimSpace(next.String()),
+					)))
+					i++
+					continue
+				}
+			}
+			break
+		}
+		// Create a new astisub.Item with the merged text as a single line
+		mergedItem := &astisub.Item{
+			StartAt: mergedStart,
+			EndAt:   mergedEnd,
+			Lines: []astisub.Line{
+				{
+					VoiceName: mergedVoiceName,
+					Items: []astisub.LineItem{
+						{Text: mergedText},
+					},
+				},
+			},
+			Comments: mergedComments,
+		}
+		mergedSubs = append(mergedSubs, mergedResult{item: mergedItem, mergedFrom: mergedFrom})
+		i++
+	}
+
+	for i, res := range mergedSubs {
+		sub := res.item
 		sub.Index = i
 		var modelName string
 		if sub.Lines[0].VoiceName != "" {
@@ -152,9 +298,10 @@ func parseSubtitleFile(config *Config, path string) []Item {
 		}
 
 		item := Item{
-			Sub:   sub,
-			Model: model,
-			Path:  generatePathTemplate(root, sub, model),
+			Sub:        sub,
+			Model:      model,
+			Path:       generatePathTemplate(root, sub, model),
+			MergedFrom: res.mergedFrom,
 		}
 
 		items = append(items, item)
@@ -202,7 +349,7 @@ func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) []AudioF
 			nextRequestIds = append(nextRequestIds, items[i].Path.Id)
 		}
 
-		log.Printf("Speaking (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
+		log.Printf("Speaking (as %s) \"%s\"\n", item.Model.name, ColorizeTags("<info>"+item.Sub.String()+"</info>"))
 		ttsReq := elevenlabs.TextToSpeechRequest{
 			VoiceSettings: &elevenlabs.VoiceSettings{
 				SpeakerBoost: true,
@@ -338,17 +485,35 @@ func generateFinalAudioFile(files []AudioFile, outputPath string) error {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		log.Fatalf("Usage: %s <path to subtitle file>", os.Args[0])
+	parser := flags.NewParser(&opts, flags.Default)
+	parser.Usage = "[OPTIONS] <path to subtitle file>"
+	_, err := parser.Parse()
+	if err != nil {
+		os.Exit(1)
 	}
-	path := os.Args[1]
 
-	config, err := readConfig("config.yaml")
+	if opts.Help || opts.Positional.Path == "" {
+		printHelp(parser)
+		os.Exit(1)
+	}
+	path := opts.Positional.Path
+
+	config, err := readConfig(opts.ConfigPath)
 	if err != nil {
 		log.Fatalf("Error reading config: %v", err)
 	}
 
-	items := parseSubtitleFile(config, path)
+	threshold := config.MergeLinesThresholdMs
+	if opts.MergeLinesThresholdMs > 0 {
+		threshold = opts.MergeLinesThresholdMs
+	}
+	if threshold > 0 {
+		log.Printf("Using merge threshold: %d", threshold)
+	} else {
+		log.Printf("No merge threshold set, not merging lines")
+	}
+
+	items := parseSubtitleFile(config, path, threshold)
 
 	client := elevenlabs.NewClient(context.Background(), config.AuthKey, 30*time.Second)
 	audioFiles := generateMissingVoiceLines(client, items)
@@ -363,13 +528,15 @@ func main() {
 			overlap = fileEndAt > nextFile.Offset && file.Item.Model.model == nextFile.Item.Model.model
 			file.Overlap = fileEndAt - nextFile.Offset
 			if overlap {
-				overlapText = fmt.Sprintf(" (OVERLAP %s)", file.Overlap.Round(time.Millisecond))
+				overlapText = ColorizeTags(fmt.Sprintf(" (<warn>OVERLAP %s</warn>)", file.Overlap.Round(time.Millisecond)))
 				overlaps = append(overlaps, file)
 			}
 		}
 
 		fmt.Printf(
-			"#%03d\n%s\nSpeaker:  %s, speed: %.2f\nSubtitle: %s --> %s (duration %s)\nAudio:    %s --> %s (duration %s)%s\nPath:     %s\n\n",
+			ColorizeTags(
+				"#%03d\n<info>%s</info>\nSpeaker:  <note>%s</note>, speed: %.2f\nSubtitle: <time>%s</time> --> <time>%s</time> (duration <time>%s</time>)\nAudio:    <time>%s</time> --> <time>%s</time> (duration <time>%s</time>)%s\nPath:     <debug>%s</debug>\n",
+			),
 			file.Item.Sub.Index+1,
 			file.Item.Sub.String(),
 			file.Item.Model.name,
@@ -383,12 +550,33 @@ func main() {
 			overlapText,
 			file.Item.Path.Path,
 		)
+		// Print merged-from info if present
+		if len(file.Item.MergedFrom) > 1 {
+			fmt.Printf("Merged from:\n")
+			for _, line := range file.Item.MergedFrom {
+				parts := strings.SplitN(line, " | ", 2)
+				if len(parts) == 2 {
+					fmt.Printf(
+						ColorizeTags("    %s\n    %s\n"),
+						parts[1], parts[0],
+					)
+				} else {
+					fmt.Printf(ColorizeTags("    %s\n"), line)
+				}
+			}
+		}
+		fmt.Printf("\n")
 	}
 
 	if len(overlaps) > 0 {
-		fmt.Println("Overlaps detected:")
+		fmt.Println(ColorizeTags("<warn>Overlaps detected:</warn>"))
 		for _, overlap := range overlaps {
-			fmt.Printf("#%03d %s\n%s\n\n", overlap.Item.Sub.Index+1, overlap.Overlap.Round(time.Millisecond), overlap.Item.Sub.String())
+			fmt.Printf(
+				ColorizeTags("#%03d <warn>%s</warn>\n<info>%s</info>\n\n"),
+				overlap.Item.Sub.Index+1,
+				overlap.Overlap.Round(time.Millisecond),
+				overlap.Item.Sub.String(),
+			)
 		}
 		fmt.Println("Fix and rerun the script to generate the final audio file.")
 		os.Exit(1)
