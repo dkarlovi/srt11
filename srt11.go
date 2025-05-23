@@ -41,6 +41,7 @@ var tagColors = map[string]string{
 	"error": colorRed,
 	"warn":  colorBlue,
 	"note":  colorCyan,
+	"debug": colorGray,
 }
 
 // Go's regexp doesn't support backreferences, so match <tag>...</tag> and check tag equality in code.
@@ -534,7 +535,7 @@ func main() {
 
 		fmt.Printf(
 			ColorizeTags(
-				"#%03d\n<info>%s</info>\nSpeaker:  <note>%s</note>, speed: %.2f\nSubtitle: <time>%s</time> --> <time>%s</time> (duration <time>%s</time>)\nAudio:    <time>%s</time> --> <time>%s</time> (duration <time>%s</time>)%s\nPath:     %s\n",
+				"#%03d\n<info>%s</info>\nSpeaker:  <note>%s</note>, speed: %.2f\nSubtitle: <time>%s</time> --> <time>%s</time> (duration <time>%s</time>)\nAudio:    <time>%s</time> --> <time>%s</time> (duration <time>%s</time>)%s\nPath:     <debug>%s</debug>\n",
 			),
 			file.Item.Sub.Index+1,
 			file.Item.Sub.String(),
