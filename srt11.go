@@ -163,6 +163,12 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs int) [
 				curSpeaker = match[1]
 			}
 		}
+		// Prepare to merge into a single line
+		mergedText := cur.String()
+		mergedStart := cur.StartAt
+		mergedEnd := cur.EndAt
+		mergedVoiceName := cur.Lines[0].VoiceName
+		mergedComments := cur.Comments
 		for {
 			// Try to merge with next lines if threshold is set
 			if mergeLinesThresholdMs > 0 && i+1 < len(subs.Items) {
@@ -179,19 +185,33 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs int) [
 						nextSpeaker = match[1]
 					}
 				}
-				gap := next.StartAt - cur.EndAt
+				gap := next.StartAt - mergedEnd
 				if curSpeaker == nextSpeaker && gap.Milliseconds() >= 0 && gap.Milliseconds() <= int64(mergeLinesThresholdMs) {
-					// Merge: extend end time, append text
-					cur.EndAt = next.EndAt
-					cur.Lines = append(cur.Lines, next.Lines...)
-					// i++ and continue merging with the next line
+					// Merge: extend end time, concat text
+					mergedEnd = next.EndAt
+					// Concatenate with a space
+					mergedText = strings.TrimSpace(mergedText) + " " + strings.TrimSpace(next.String())
 					i++
 					continue
 				}
 			}
 			break
 		}
-		mergedSubs = append(mergedSubs, cur)
+		// Create a new astisub.Item with the merged text as a single line
+		mergedItem := &astisub.Item{
+			StartAt: mergedStart,
+			EndAt:   mergedEnd,
+			Lines: []astisub.Line{
+				{
+					VoiceName: mergedVoiceName,
+					Items: []astisub.LineItem{
+						{Text: mergedText},
+					},
+				},
+			},
+			Comments: mergedComments,
+		}
+		mergedSubs = append(mergedSubs, mergedItem)
 		i++
 	}
 
