@@ -19,4 +19,4 @@ require (
 	golang.org/x/text v0.3.2 // indirect
 )
 
-replace github.com/haguro/elevenlabs-go => github.com/dkarlovi/elevenlabs-go prev-next
+replace github.com/haguro/elevenlabs-go => github.com/dkarlovi/elevenlabs-go v0.0.0-20250328130444-fdabdaa08072
