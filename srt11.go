@@ -52,9 +52,10 @@ type Path struct {
 }
 
 type Item struct {
-	Sub   *astisub.Item
-	Model Model
-	Path  Path
+	Sub        *astisub.Item
+	Model      Model
+	Path       Path
+	MergedFrom []string // timings of merged-from lines
 }
 
 type AudioFile struct {
@@ -146,7 +147,11 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs int) [
 	root, _ := filepath.Abs(filepath.Dir(path))
 
 	// Merge logic
-	mergedSubs := make([]*astisub.Item, 0)
+	type mergedResult struct {
+		item       *astisub.Item
+		mergedFrom []string
+	}
+	mergedSubs := make([]mergedResult, 0)
 	i := 0
 	for i < len(subs.Items) {
 		cur := subs.Items[i]
@@ -169,6 +174,14 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs int) [
 		mergedEnd := cur.EndAt
 		mergedVoiceName := cur.Lines[0].VoiceName
 		mergedComments := cur.Comments
+		mergedFrom := []string{
+			fmt.Sprintf("%s --> %s (duration %s) | %s",
+				cur.StartAt.Round(time.Millisecond),
+				cur.EndAt.Round(time.Millisecond),
+				(cur.EndAt - cur.StartAt).Round(time.Millisecond),
+				strings.TrimSpace(cur.String()),
+			),
+		}
 		for {
 			// Try to merge with next lines if threshold is set
 			if mergeLinesThresholdMs > 0 && i+1 < len(subs.Items) {
@@ -189,8 +202,13 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs int) [
 				if curSpeaker == nextSpeaker && gap.Milliseconds() >= 0 && gap.Milliseconds() <= int64(mergeLinesThresholdMs) {
 					// Merge: extend end time, concat text
 					mergedEnd = next.EndAt
-					// Concatenate with a space
 					mergedText = strings.TrimSpace(mergedText) + " " + strings.TrimSpace(next.String())
+					mergedFrom = append(mergedFrom, fmt.Sprintf("%s --> %s (duration %s) | %s",
+						next.StartAt.Round(time.Millisecond),
+						next.EndAt.Round(time.Millisecond),
+						(next.EndAt-next.StartAt).Round(time.Millisecond),
+						strings.TrimSpace(next.String()),
+					))
 					i++
 					continue
 				}
@@ -211,11 +229,12 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs int) [
 			},
 			Comments: mergedComments,
 		}
-		mergedSubs = append(mergedSubs, mergedItem)
+		mergedSubs = append(mergedSubs, mergedResult{item: mergedItem, mergedFrom: mergedFrom})
 		i++
 	}
 
-	for i, sub := range mergedSubs {
+	for i, res := range mergedSubs {
+		sub := res.item
 		sub.Index = i
 		var modelName string
 		if sub.Lines[0].VoiceName != "" {
@@ -240,9 +259,10 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs int) [
 		}
 
 		item := Item{
-			Sub:   sub,
-			Model: model,
-			Path:  generatePathTemplate(root, sub, model),
+			Sub:        sub,
+			Model:      model,
+			Path:       generatePathTemplate(root, sub, model),
+			MergedFrom: res.mergedFrom,
 		}
 
 		items = append(items, item)
@@ -475,7 +495,7 @@ func main() {
 		}
 
 		fmt.Printf(
-			"#%03d\n%s\nSpeaker:  %s, speed: %.2f\nSubtitle: %s --> %s (duration %s)\nAudio:    %s --> %s (duration %s)%s\nPath:     %s\n\n",
+			"#%03d\n%s\nSpeaker:  %s, speed: %.2f\nSubtitle: %s --> %s (duration %s)\nAudio:    %s --> %s (duration %s)%s\nPath:     %s\n",
 			file.Item.Sub.Index+1,
 			file.Item.Sub.String(),
 			file.Item.Model.name,
@@ -489,6 +509,19 @@ func main() {
 			overlapText,
 			file.Item.Path.Path,
 		)
+		// Print merged-from info if present
+		if len(file.Item.MergedFrom) > 1 {
+			fmt.Printf("Merged from:\n")
+			for _, line := range file.Item.MergedFrom {
+				parts := strings.SplitN(line, " | ", 2)
+				if len(parts) == 2 {
+					fmt.Printf("    %s\n    %s\n", parts[1], parts[0])
+				} else {
+					fmt.Printf("    %s\n", line)
+				}
+			}
+		}
+		fmt.Printf("\n")
 	}
 
 	if len(overlaps) > 0 {
