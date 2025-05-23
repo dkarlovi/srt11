@@ -11,6 +11,9 @@ on:
 jobs:
     build:
         runs-on: ${{ matrix.os }}
+        permissions:
+            id-token: write
+            contents: read
         strategy:
             matrix:
                 os: [ ubuntu-latest, macos-latest, windows-latest ]
@@ -50,6 +53,7 @@ jobs:
                 if: runner.os == 'Windows'
                 run: choco install zip -y
                 shell: bash
+
             -   name: Prepare artifact
                 run: |
                     VERSION="${{ steps.vars.outputs.ARTIFACT_VERSION }}"
@@ -62,6 +66,18 @@ jobs:
                     fi
                 shell: bash
 
+            -   name: Generate SHA256 checksums
+                id: checksums
+                run: |
+                    for f in srt11-*.zip; do
+                      sha256sum "$f" >> checksums.txt
+                    done
+                    # Output checksums in the format: file=sha256:hash
+                    CHECKSUMS=$(awk '{printf "%s=sha256:%s\n", $2, $1}' checksums.txt | paste -sd, -)
+                    echo "checksums=$CHECKSUMS" >> $GITHUB_OUTPUT
+                shell: bash
+
+
             -   name: Upload artifact
                 uses: actions/upload-artifact@v4
                 with:
@@ -73,6 +89,7 @@ jobs:
                 uses: actions/attest-build-provenance@v1
                 with:
                     subject-path: srt11-${{ steps.vars.outputs.ARTIFACT_VERSION }}-*.zip
+                    subject-checksums: ${{ steps.checksums.outputs.checksums }}
                     upload-assets: true
 
             -   name: Upload to GitHub Release
