@@ -97,11 +97,10 @@ jobs:
                         srt11-*.zip
 
             -   name: Attest build provenance
-                uses: actions/attest-build-provenance@v1
+                uses: actions/attest-build-provenance@v2
                 with:
                     subject-path: srt11-${{ steps.vars.outputs.ARTIFACT_VERSION }}-*.zip
-                    subject-checksums: ${{ steps.checksums.outputs.checksums }}
-                    upload-assets: true
+                    subject-checksums: checksums.txt
 
             -   name: Upload to GitHub Release
                 if: github.event_name == 'release'
