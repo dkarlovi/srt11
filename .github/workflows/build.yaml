@@ -32,6 +32,7 @@ jobs:
                       BRANCH=$(echo "${GITHUB_REF_NAME}" | tr '/' '-')
                       echo "ARTIFACT_VERSION=${BRANCH}" >> $GITHUB_OUTPUT
                     fi
+                shell: bash
 
             -   name: Build
                 run: |
