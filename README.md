@@ -19,8 +19,8 @@ Pre-built binaries for Linux, Windows, and Mac are available at:
     # Optional: merge lines if same speaker and gap is below this threshold (in ms)
     merge_lines_threshold_ms: 50
     models:
-        # use by adding [Joe] in front of the text
-        # or as the first comment in VTT subtitles
+        # Optional: add custom speakers
+        # https://github.com/dkarlovi/srt11?tab=readme-ov-file#speakers
         Joe:
             model: "joe_model_id"
             name: "Joe"
