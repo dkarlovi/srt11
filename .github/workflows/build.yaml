@@ -43,6 +43,10 @@ jobs:
                     fi
                 shell: bash
 
+            - name: Install zip (Windows)
+              if: runner.os == 'Windows'
+              run: choco install zip -y
+              shell: bash
             -   name: Prepare artifact
                 run: |
                     VERSION="${{ steps.vars.outputs.ARTIFACT_VERSION }}"
