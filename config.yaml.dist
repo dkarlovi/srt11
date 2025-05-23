@@ -3,9 +3,12 @@ default:
     model: "model_id"
     name: "Speaker name"
     speed: 1.1
+# Optional: merge lines if same speaker and gap is below this threshold (in ms)
+merge_lines_threshold_ms: 500
 models:
     # use by adding [Joe] in front of the text
     # or ass the first comment in VTT subtitles
     Joe:
         model: "joe_model_id"
         name: "Joe"
+

@@ -11,6 +11,7 @@ import (
 
 	"github.com/haguro/elevenlabs-go"
 	"github.com/hajimehoshi/go-mp3"
+	"github.com/jessevdk/go-flags"
 	"gopkg.in/yaml.v2"
 	"io"
 	"io/ioutil"
@@ -34,6 +35,7 @@ type Config struct {
 		Name  string  `yaml:"name"`
 		Speed float32 `yaml:"speed"`
 	} `yaml:"models"`
+	MergeLinesThresholdMs int `yaml:"merge_lines_threshold_ms"` // optional
 }
 
 type Model struct {
@@ -61,6 +63,21 @@ type AudioFile struct {
 	Offset   time.Duration
 	Channel  int
 	Overlap  time.Duration
+}
+
+type Options struct {
+	MergeLinesThresholdMs int    `short:"m" long:"merge-lines-threshold-ms" description:"Merge lines if same speaker and gap is below this threshold (ms)"`
+	ConfigPath            string `short:"c" long:"config" description:"Path to config YAML file" default:"config.yaml"`
+	Help                  bool   `short:"h" long:"help" description:"Show this help message"`
+	Positional            struct {
+		Path string `description:"Path to subtitle file" positional-arg-name:"path"`
+	} `positional-args:"yes"`
+}
+
+var opts Options
+
+func printHelp(parser *flags.Parser) {
+	parser.WriteHelp(os.Stdout)
 }
 
 func readConfig(filename string) (*Config, error) {
@@ -118,7 +135,7 @@ func generatePathTemplate(root string, item *astisub.Item, model Model) Path {
 	return Path{Template: template}
 }
 
-func parseSubtitleFile(config *Config, path string) []Item {
+func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs int) []Item {
 	subs, err := astisub.OpenFile(path)
 	if err != nil {
 		log.Fatalf("Error parsing VTT file: %v", err)
@@ -127,7 +144,59 @@ func parseSubtitleFile(config *Config, path string) []Item {
 	modelChannels := generateModelChannelMap(config)
 	items := make([]Item, 0)
 	root, _ := filepath.Abs(filepath.Dir(path))
-	for i, sub := range subs.Items {
+
+	log.Print(mergeLinesThresholdMs)
+
+	// Merge logic
+	mergedSubs := make([]*astisub.Item, 0)
+	i := 0
+	for i < len(subs.Items) {
+		cur := subs.Items[i]
+		// Determine speaker for current line
+		var curSpeaker string
+		if cur.Lines[0].VoiceName != "" {
+			curSpeaker = cur.Lines[0].VoiceName
+		} else if len(cur.Comments) > 0 {
+			curSpeaker = cur.Comments[0]
+		} else {
+			re := regexp.MustCompile(`\[(.*?)\]\s*(.+)`)
+			match := re.FindStringSubmatch(cur.String())
+			if len(match) > 1 {
+				curSpeaker = match[1]
+			}
+		}
+		// Try to merge with next lines if threshold is set
+		if mergeLinesThresholdMs > 0 && i+1 < len(subs.Items) {
+			next := subs.Items[i+1]
+			var nextSpeaker string
+			if next.Lines[0].VoiceName != "" {
+				nextSpeaker = next.Lines[0].VoiceName
+			} else if len(next.Comments) > 0 {
+				nextSpeaker = next.Comments[0]
+			} else {
+				re := regexp.MustCompile(`\[(.*?)\]\s*(.+)`)
+				match := re.FindStringSubmatch(next.String())
+				if len(match) > 1 {
+					nextSpeaker = match[1]
+				}
+			}
+			gap := next.StartAt - cur.EndAt
+			if curSpeaker == nextSpeaker && gap.Milliseconds() >= 0 && gap.Milliseconds() <= int64(mergeLinesThresholdMs) {
+				// Merge: extend end time, append text
+				cur.EndAt = next.EndAt
+				// Merge lines (preserve formatting)
+				cur.Lines = append(cur.Lines, next.Lines...)
+				// Optionally, merge comments if needed
+				// cur.Comments = append(cur.Comments, next.Comments...)
+				i++ // skip next, stay on cur for further merges
+				continue
+			}
+		}
+		mergedSubs = append(mergedSubs, cur)
+		i++
+	}
+
+	for i, sub := range mergedSubs {
 		sub.Index = i
 		var modelName string
 		if sub.Lines[0].VoiceName != "" {
@@ -338,17 +407,34 @@ func generateFinalAudioFile(files []AudioFile, outputPath string) error {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		log.Fatalf("Usage: %s <path to subtitle file>", os.Args[0])
+	parser := flags.NewParser(&opts, flags.Default)
+	parser.Usage = "[OPTIONS] <path to subtitle file>"
+	_, err := parser.Parse()
+	if err != nil {
+		os.Exit(1)
 	}
-	path := os.Args[1]
 
-	config, err := readConfig("config.yaml")
+	if opts.Help || opts.Positional.Path == "" {
+		printHelp(parser)
+		os.Exit(1)
+	}
+	path := opts.Positional.Path
+
+	config, err := readConfig(opts.ConfigPath)
 	if err != nil {
 		log.Fatalf("Error reading config: %v", err)
 	}
 
-	items := parseSubtitleFile(config, path)
+	log.Printf("Config merge_lines_threshold_ms: %d", config.MergeLinesThresholdMs)
+	log.Printf("CLI merge-lines-threshold-ms: %d", opts.MergeLinesThresholdMs)
+
+	threshold := config.MergeLinesThresholdMs
+	if opts.MergeLinesThresholdMs > 0 {
+		threshold = opts.MergeLinesThresholdMs
+	}
+	log.Printf("Using mergeLinesThresholdMs: %d", threshold)
+
+	items := parseSubtitleFile(config, path, threshold)
 
 	client := elevenlabs.NewClient(context.Background(), config.AuthKey, 30*time.Second)
 	audioFiles := generateMissingVoiceLines(client, items)
