@@ -23,6 +23,44 @@ import (
 	"time"
 )
 
+// --- Colorizing output ---
+
+var (
+	colorReset  = "\033[0m"
+	colorGreen  = "\033[92m" // light green
+	colorYellow = "\033[93m" // bright yellow
+	colorRed    = "\033[91m"
+	colorBlue   = "\033[94m" // bright blue
+	colorCyan   = "\033[96m"
+	colorGray   = "\033[90m"
+)
+
+var tagColors = map[string]string{
+	"info":  colorGreen,
+	"time":  colorYellow,
+	"error": colorRed,
+	"warn":  colorBlue,
+	"note":  colorCyan,
+}
+
+// Go's regexp doesn't support backreferences, so match <tag>...</tag> and check tag equality in code.
+var tagRegex = regexp.MustCompile(`<([a-zA-Z]+)>(.*?)</([a-zA-Z]+)>`)
+
+func ColorizeTags(s string) string {
+	return tagRegex.ReplaceAllStringFunc(s, func(m string) string {
+		matches := tagRegex.FindStringSubmatch(m)
+		if len(matches) == 4 && matches[1] == matches[3] {
+			color, ok := tagColors[matches[1]]
+			if ok {
+				return color + matches[2] + colorReset
+			}
+		}
+		return m
+	})
+}
+
+// --- end colorizing output ---
+
 type Config struct {
 	AuthKey string `yaml:"auth_key"`
 	Default struct {
@@ -175,12 +213,12 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs int) [
 		mergedVoiceName := cur.Lines[0].VoiceName
 		mergedComments := cur.Comments
 		mergedFrom := []string{
-			fmt.Sprintf("%s --> %s (duration %s) | %s",
+			ColorizeTags(fmt.Sprintf("<time>%s</time> --> <time>%s</time> (duration <time>%s</time>) | <info>%s</info>",
 				cur.StartAt.Round(time.Millisecond),
 				cur.EndAt.Round(time.Millisecond),
 				(cur.EndAt - cur.StartAt).Round(time.Millisecond),
 				strings.TrimSpace(cur.String()),
-			),
+			)),
 		}
 		for {
 			// Try to merge with next lines if threshold is set
@@ -203,12 +241,12 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs int) [
 					// Merge: extend end time, concat text
 					mergedEnd = next.EndAt
 					mergedText = strings.TrimSpace(mergedText) + " " + strings.TrimSpace(next.String())
-					mergedFrom = append(mergedFrom, fmt.Sprintf("%s --> %s (duration %s) | %s",
+					mergedFrom = append(mergedFrom, ColorizeTags(fmt.Sprintf("<time>%s</time> --> <time>%s</time> (duration <time>%s</time>) | <info>%s</info>",
 						next.StartAt.Round(time.Millisecond),
 						next.EndAt.Round(time.Millisecond),
 						(next.EndAt-next.StartAt).Round(time.Millisecond),
 						strings.TrimSpace(next.String()),
-					))
+					)))
 					i++
 					continue
 				}
@@ -310,7 +348,7 @@ func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) []AudioF
 			nextRequestIds = append(nextRequestIds, items[i].Path.Id)
 		}
 
-		log.Printf("Speaking (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
+		log.Printf("Speaking (as %s) \"%s\"\n", item.Model.name, ColorizeTags("<info>"+item.Sub.String()+"</info>"))
 		ttsReq := elevenlabs.TextToSpeechRequest{
 			VoiceSettings: &elevenlabs.VoiceSettings{
 				SpeakerBoost: true,
@@ -489,13 +527,15 @@ func main() {
 			overlap = fileEndAt > nextFile.Offset && file.Item.Model.model == nextFile.Item.Model.model
 			file.Overlap = fileEndAt - nextFile.Offset
 			if overlap {
-				overlapText = fmt.Sprintf(" (OVERLAP %s)", file.Overlap.Round(time.Millisecond))
+				overlapText = ColorizeTags(fmt.Sprintf(" (<warn>OVERLAP %s</warn>)", file.Overlap.Round(time.Millisecond)))
 				overlaps = append(overlaps, file)
 			}
 		}
 
 		fmt.Printf(
-			"#%03d\n%s\nSpeaker:  %s, speed: %.2f\nSubtitle: %s --> %s (duration %s)\nAudio:    %s --> %s (duration %s)%s\nPath:     %s\n",
+			ColorizeTags(
+				"#%03d\n<info>%s</info>\nSpeaker:  <note>%s</note>, speed: %.2f\nSubtitle: <time>%s</time> --> <time>%s</time> (duration <time>%s</time>)\nAudio:    <time>%s</time> --> <time>%s</time> (duration <time>%s</time>)%s\nPath:     %s\n",
+			),
 			file.Item.Sub.Index+1,
 			file.Item.Sub.String(),
 			file.Item.Model.name,
@@ -515,9 +555,12 @@ func main() {
 			for _, line := range file.Item.MergedFrom {
 				parts := strings.SplitN(line, " | ", 2)
 				if len(parts) == 2 {
-					fmt.Printf("    %s\n    %s\n", parts[1], parts[0])
+					fmt.Printf(
+						ColorizeTags("    %s\n    %s\n"),
+						parts[1], parts[0],
+					)
 				} else {
-					fmt.Printf("    %s\n", line)
+					fmt.Printf(ColorizeTags("    %s\n"), line)
 				}
 			}
 		}
@@ -525,9 +568,14 @@ func main() {
 	}
 
 	if len(overlaps) > 0 {
-		fmt.Println("Overlaps detected:")
+		fmt.Println(ColorizeTags("<warn>Overlaps detected:</warn>"))
 		for _, overlap := range overlaps {
-			fmt.Printf("#%03d %s\n%s\n\n", overlap.Item.Sub.Index+1, overlap.Overlap.Round(time.Millisecond), overlap.Item.Sub.String())
+			fmt.Printf(
+				ColorizeTags("#%03d <warn>%s</warn>\n<info>%s</info>\n\n"),
+				overlap.Item.Sub.Index+1,
+				overlap.Overlap.Round(time.Millisecond),
+				overlap.Item.Sub.String(),
+			)
 		}
 		fmt.Println("Fix and rerun the script to generate the final audio file.")
 		os.Exit(1)
