@@ -20,7 +20,7 @@ Pre-built binaries for Linux, Windows, and Mac are available at:
     merge_lines_threshold_ms: 50
     models:
         # use by adding [Joe] in front of the text
-        # or ass the first comment in VTT subtitles
+        # or as the first comment in VTT subtitles
         Joe:
             model: "joe_model_id"
             name: "Joe"
