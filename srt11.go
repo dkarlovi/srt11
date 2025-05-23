@@ -145,8 +145,6 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs int) [
 	items := make([]Item, 0)
 	root, _ := filepath.Abs(filepath.Dir(path))
 
-	log.Print(mergeLinesThresholdMs)
-
 	// Merge logic
 	mergedSubs := make([]*astisub.Item, 0)
 	i := 0
@@ -165,32 +163,33 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs int) [
 				curSpeaker = match[1]
 			}
 		}
-		// Try to merge with next lines if threshold is set
-		if mergeLinesThresholdMs > 0 && i+1 < len(subs.Items) {
-			next := subs.Items[i+1]
-			var nextSpeaker string
-			if next.Lines[0].VoiceName != "" {
-				nextSpeaker = next.Lines[0].VoiceName
-			} else if len(next.Comments) > 0 {
-				nextSpeaker = next.Comments[0]
-			} else {
-				re := regexp.MustCompile(`\[(.*?)\]\s*(.+)`)
-				match := re.FindStringSubmatch(next.String())
-				if len(match) > 1 {
-					nextSpeaker = match[1]
+		for {
+			// Try to merge with next lines if threshold is set
+			if mergeLinesThresholdMs > 0 && i+1 < len(subs.Items) {
+				next := subs.Items[i+1]
+				var nextSpeaker string
+				if next.Lines[0].VoiceName != "" {
+					nextSpeaker = next.Lines[0].VoiceName
+				} else if len(next.Comments) > 0 {
+					nextSpeaker = next.Comments[0]
+				} else {
+					re := regexp.MustCompile(`\[(.*?)\]\s*(.+)`)
+					match := re.FindStringSubmatch(next.String())
+					if len(match) > 1 {
+						nextSpeaker = match[1]
+					}
+				}
+				gap := next.StartAt - cur.EndAt
+				if curSpeaker == nextSpeaker && gap.Milliseconds() >= 0 && gap.Milliseconds() <= int64(mergeLinesThresholdMs) {
+					// Merge: extend end time, append text
+					cur.EndAt = next.EndAt
+					cur.Lines = append(cur.Lines, next.Lines...)
+					// i++ and continue merging with the next line
+					i++
+					continue
 				}
 			}
-			gap := next.StartAt - cur.EndAt
-			if curSpeaker == nextSpeaker && gap.Milliseconds() >= 0 && gap.Milliseconds() <= int64(mergeLinesThresholdMs) {
-				// Merge: extend end time, append text
-				cur.EndAt = next.EndAt
-				// Merge lines (preserve formatting)
-				cur.Lines = append(cur.Lines, next.Lines...)
-				// Optionally, merge comments if needed
-				// cur.Comments = append(cur.Comments, next.Comments...)
-				i++ // skip next, stay on cur for further merges
-				continue
-			}
+			break
 		}
 		mergedSubs = append(mergedSubs, cur)
 		i++
@@ -425,14 +424,15 @@ func main() {
 		log.Fatalf("Error reading config: %v", err)
 	}
 
-	log.Printf("Config merge_lines_threshold_ms: %d", config.MergeLinesThresholdMs)
-	log.Printf("CLI merge-lines-threshold-ms: %d", opts.MergeLinesThresholdMs)
-
 	threshold := config.MergeLinesThresholdMs
 	if opts.MergeLinesThresholdMs > 0 {
 		threshold = opts.MergeLinesThresholdMs
 	}
-	log.Printf("Using mergeLinesThresholdMs: %d", threshold)
+	if threshold > 0 {
+		log.Printf("Using merge threshold: %d", threshold)
+	} else {
+		log.Printf("No merge threshold set, not merging lines")
+	}
 
 	items := parseSubtitleFile(config, path, threshold)
 
