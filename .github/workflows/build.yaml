@@ -69,14 +69,25 @@ jobs:
             -   name: Generate SHA256 checksums
                 id: checksums
                 run: |
-                    for f in srt11-*.zip; do
-                      sha256sum "$f" >> checksums.txt
-                    done
+                    if [[ "$RUNNER_OS" == "Windows" ]]; then
+                      for f in srt11-*.zip; do
+                        CertUtil -hashfile "$f" SHA256 | findstr /R /C:"^[0-9a-fA-F]*$" > tmp.txt
+                        HASH=$(type tmp.txt)
+                        echo "$HASH  $f" >> checksums.txt
+                      done
+                    elif [[ "$RUNNER_OS" == "macOS" ]]; then
+                      for f in srt11-*.zip; do
+                        shasum -a 256 "$f" >> checksums.txt
+                      done
+                    else
+                      for f in srt11-*.zip; do
+                        sha256sum "$f" >> checksums.txt
+                      done
+                    fi
                     # Output checksums in the format: file=sha256:hash
                     CHECKSUMS=$(awk '{printf "%s=sha256:%s\n", $2, $1}' checksums.txt | paste -sd, -)
                     echo "checksums=$CHECKSUMS" >> $GITHUB_OUTPUT
                 shell: bash
-
 
             -   name: Upload artifact
                 uses: actions/upload-artifact@v4
