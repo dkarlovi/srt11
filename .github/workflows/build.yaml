@@ -5,6 +5,8 @@ on:
         branches: [ main ]
     pull_request:
         branches: [ main ]
+    release:
+        types: [published]
 
 jobs:
     build:
@@ -30,9 +32,26 @@ jobs:
                   fi
               shell: bash
 
+            - name: Prepare artifact
+              run: |
+                  if [[ "$RUNNER_OS" == "Windows" ]]; then
+                    zip srt11-${{ github.event.release.tag_name || 'dev' }}-windows.zip srt11.exe
+                  elif [[ "$RUNNER_OS" == "macOS' ]]; then
+                    zip srt11-${{ github.event.release.tag_name || 'dev' }}-macos.zip srt11
+                  else
+                    zip srt11-${{ github.event.release.tag_name || 'dev' }}-linux.zip srt11
+                  fi
+              shell: bash
+
             - name: Upload artifact
               uses: actions/upload-artifact@v4
               with:
-                  name: srt11-${{ runner.os }}
+                  name: srt11-${{ github.event.release.tag_name || 'dev' }}-${{ runner.os }}
                   path: |
-                      srt11*
+                      srt11-*.zip
+
+            - name: Upload to GitHub Release
+              if: github.event_name == 'release'
+              uses: softprops/action-gh-release@v2
+              with:
+                  files: srt11-${{ github.event.release.tag_name }}-*.zip
