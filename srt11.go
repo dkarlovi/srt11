@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/md5"
+	"errors"
 	"fmt"
 
 	"github.com/asticode/go-astisub"
@@ -12,7 +13,7 @@ import (
 	"github.com/haguro/elevenlabs-go"
 	"github.com/hajimehoshi/go-mp3"
 	"github.com/jessevdk/go-flags"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 	"io"
 	"io/ioutil"
 	"log"
@@ -126,8 +127,17 @@ func readConfig(filename string) (*Config, error) {
 		return nil, err
 	}
 	var config Config
-	err = yaml.Unmarshal(data, &config)
-	if err != nil {
+	decoder := yaml.NewDecoder(strings.NewReader(string(data)))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&config); err != nil {
+		var typeError *yaml.TypeError
+		if errors.As(err, &typeError) {
+			msg := ""
+			for _, field := range typeError.Errors {
+				msg += ColorizeTags(fmt.Sprintf("  - <error>%s</error>\n", field))
+			}
+			return nil, fmt.Errorf(ColorizeTags("error parsing config file <info>%s</info>:\n%s"), filename, msg)
+		}
 		return nil, err
 	}
 	return &config, nil
