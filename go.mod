@@ -1,6 +1,6 @@
 module github.com/dkarlovi/srt11
 
-go 1.23.6
+go 1.23.0
 
 require (
 	github.com/asticode/go-astisub v0.34.0
@@ -13,12 +13,12 @@ require (
 )
 
 require (
-	github.com/asticode/go-astikit v0.20.0 // indirect
-	github.com/asticode/go-astits v1.8.0 // indirect
+	github.com/asticode/go-astikit v0.56.0 // indirect
+	github.com/asticode/go-astits v1.13.0 // indirect
 	github.com/go-audio/riff v1.0.0 // indirect
-	golang.org/x/net v0.0.0-20200904194848-62affa334b73 // indirect
-	golang.org/x/sys v0.21.0 // indirect
-	golang.org/x/text v0.3.2 // indirect
+	golang.org/x/net v0.41.0 // indirect
+	golang.org/x/sys v0.33.0 // indirect
+	golang.org/x/text v0.26.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
 
