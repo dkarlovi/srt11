@@ -1,19 +1,10 @@
-package main
+package commands
 
 import (
 	"context"
 	"crypto/md5"
 	"errors"
 	"fmt"
-
-	"github.com/asticode/go-astisub"
-	"github.com/go-audio/audio"
-	"github.com/go-audio/wav"
-
-	"github.com/haguro/elevenlabs-go"
-	"github.com/hajimehoshi/go-mp3"
-	"github.com/jessevdk/go-flags"
-	"gopkg.in/yaml.v3"
 	"io"
 	"io/ioutil"
 	"log"
@@ -22,46 +13,15 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/asticode/go-astisub"
+	"github.com/go-audio/audio"
+	"github.com/go-audio/wav"
+	"github.com/haguro/elevenlabs-go"
+	"github.com/hajimehoshi/go-mp3"
+	"github.com/symfony-cli/console"
+	"gopkg.in/yaml.v3"
 )
-
-// --- Colorizing output ---
-
-var (
-	colorReset  = "\033[0m"
-	colorGreen  = "\033[92m" // light green
-	colorYellow = "\033[93m" // bright yellow
-	colorRed    = "\033[91m"
-	colorBlue   = "\033[94m" // bright blue
-	colorCyan   = "\033[96m"
-	colorGray   = "\033[90m"
-)
-
-var tagColors = map[string]string{
-	"info":  colorGreen,
-	"time":  colorYellow,
-	"error": colorRed,
-	"warn":  colorBlue,
-	"note":  colorCyan,
-	"debug": colorGray,
-}
-
-// Go's regexp doesn't support backreferences, so match <tag>...</tag> and check tag equality in code.
-var tagRegex = regexp.MustCompile(`<([a-zA-Z]+)>(.*?)</([a-zA-Z]+)>`)
-
-func ColorizeTags(s string) string {
-	return tagRegex.ReplaceAllStringFunc(s, func(m string) string {
-		matches := tagRegex.FindStringSubmatch(m)
-		if len(matches) == 4 && matches[1] == matches[3] {
-			color, ok := tagColors[matches[1]]
-			if ok {
-				return color + matches[2] + colorReset
-			}
-		}
-		return m
-	})
-}
-
-// --- end colorizing output ---
 
 type Config struct {
 	AuthKey string `yaml:"auth_key"`
@@ -106,19 +66,122 @@ type AudioFile struct {
 	Overlap  time.Duration
 }
 
-type Options struct {
-	MergeLinesThresholdMs int    `short:"m" long:"merge-lines-threshold-ms" description:"Merge lines if same speaker and gap is below this threshold (ms)"`
-	ConfigPath            string `short:"c" long:"config" description:"Path to config YAML file" default:"config.yaml"`
-	Help                  bool   `short:"h" long:"help" description:"Show this help message"`
-	Positional            struct {
-		Path string `description:"Path to subtitle file" positional-arg-name:"path"`
-	} `positional-args:"yes"`
+// All returns all available commands
+func All() []*console.Command {
+	return []*console.Command{
+		{
+			Name:        "run",
+			Usage:       "Convert subtitle files to audio using ElevenLabs TTS",
+			Description: "Convert subtitle files to audio",
+			Flags: []console.Flag{
+				&console.IntFlag{
+					Name:    "merge-lines-threshold-ms",
+					Aliases: []string{"m"},
+					Usage:   "Merge lines if same speaker and gap is below this threshold (ms)",
+				},
+			},
+			Action: func(c *console.Context) error {
+				return RunSrt11(c)
+			},
+		},
+	}
 }
 
-var opts Options
+func RunSrt11(c *console.Context) error {
+	if c.NArg() < 1 {
+		return console.Exit("Error: path to subtitle file is required", 1)
+	}
+	args := c.Args().Slice()
+	path := args[0]
 
-func printHelp(parser *flags.Parser) {
-	parser.WriteHelp(os.Stdout)
+	config, err := readConfig(c.String("config"))
+	if err != nil {
+		return console.Exit(fmt.Sprintf("Error reading config: %v", err), 1)
+	}
+
+	threshold := config.MergeLinesThresholdMs
+	if c.Int("merge-lines-threshold-ms") > 0 {
+		threshold = c.Int("merge-lines-threshold-ms")
+	}
+	if threshold > 0 {
+		log.Printf("Using merge threshold: %d", threshold)
+	} else {
+		log.Printf("No merge threshold set, not merging lines")
+	}
+
+	items := parseSubtitleFile(config, path, threshold)
+
+	client := elevenlabs.NewClient(context.Background(), config.AuthKey, 30*time.Second)
+	audioFiles := generateMissingVoiceLines(client, items)
+
+	overlaps := make([]AudioFile, 0)
+	for i, file := range audioFiles {
+		fileEndAt := file.Offset + file.Duration
+		var overlap bool
+		var overlapText string
+		if i < len(audioFiles)-1 {
+			nextFile := audioFiles[i+1]
+			overlap = fileEndAt > nextFile.Offset && file.Item.Model.model == nextFile.Item.Model.model
+			file.Overlap = fileEndAt - nextFile.Offset
+			if overlap {
+				overlapText = fmt.Sprintf(" (<fg=yellow>OVERLAP %s</>)", file.Overlap.Round(time.Millisecond))
+				overlaps = append(overlaps, file)
+			}
+		}
+
+		fmt.Fprintf(c.App.Writer,
+			"#%03d\n<info>%s</>\nSpeaker:  <comment>%s</>, speed: %.2f\nSubtitle: <fg=yellow>%s</> --> <fg=yellow>%s</> (duration <fg=yellow>%s</>)\nAudio:    <fg=yellow>%s</> --> <fg=yellow>%s</> (duration <fg=yellow>%s</>)%s\nPath:     <fg=gray>%s</>\n",
+			file.Item.Sub.Index+1,
+			file.Item.Sub.String(),
+			file.Item.Model.name,
+			file.Item.Model.speed,
+			file.Item.Sub.StartAt.Round(time.Millisecond),
+			file.Item.Sub.EndAt.Round(time.Millisecond),
+			(file.Item.Sub.EndAt - file.Item.Sub.StartAt).Round(time.Millisecond),
+			file.Offset.Round(time.Millisecond),
+			fileEndAt.Round(time.Millisecond),
+			file.Duration.Round(time.Millisecond),
+			overlapText,
+			file.Item.Path.Path,
+		)
+		// Print merged-from info if present
+		if len(file.Item.MergedFrom) > 1 {
+			fmt.Fprintf(c.App.Writer, "Merged from:\n")
+			for _, line := range file.Item.MergedFrom {
+				parts := strings.SplitN(line, " | ", 2)
+				if len(parts) == 2 {
+					fmt.Fprintf(c.App.Writer,
+						"    %s\n    %s\n",
+						parts[1], parts[0],
+					)
+				} else {
+					fmt.Fprintf(c.App.Writer, "    %s\n", line)
+				}
+			}
+		}
+		fmt.Fprintf(c.App.Writer, "\n")
+	}
+
+	if len(overlaps) > 0 {
+		fmt.Fprintf(c.App.Writer, "<fg=yellow>Overlaps detected:</>\n")
+		for _, overlap := range overlaps {
+			fmt.Fprintf(c.App.Writer,
+				"#%03d <fg=yellow>%s</>\n<info>%s</>\n\n",
+				overlap.Item.Sub.Index+1,
+				overlap.Overlap.Round(time.Millisecond),
+				overlap.Item.Sub.String(),
+			)
+		}
+		fmt.Fprintf(c.App.Writer, "Fix and rerun the script to generate the final audio file.\n")
+		os.Exit(1)
+	}
+
+	outputPath := strings.TrimSuffix(path, filepath.Ext(path)) + "_" + time.Now().Format("2006-01-02-15-04-05") + ".wav"
+	if err := generateFinalAudioFile(audioFiles, outputPath); err != nil {
+		return console.Exit(fmt.Sprintf("Error writing final audio track: %v", err), 1)
+	}
+	log.Printf("Final audio track written to %s\n", outputPath)
+	return nil
 }
 
 func readConfig(filename string) (*Config, error) {
@@ -134,9 +197,9 @@ func readConfig(filename string) (*Config, error) {
 		if errors.As(err, &typeError) {
 			msg := ""
 			for _, field := range typeError.Errors {
-				msg += ColorizeTags(fmt.Sprintf("  - <error>%s</error>\n", field))
+				msg += fmt.Sprintf("  - <fg=red>%s</>\n", field)
 			}
-			return nil, fmt.Errorf(ColorizeTags("error parsing config file <info>%s</info>:\n%s"), filename, msg)
+			return nil, fmt.Errorf("error parsing config file <info>%s</>:\n%s", filename, msg)
 		}
 		return nil, err
 	}
@@ -224,12 +287,12 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs int) [
 		mergedVoiceName := cur.Lines[0].VoiceName
 		mergedComments := cur.Comments
 		mergedFrom := []string{
-			ColorizeTags(fmt.Sprintf("<time>%s</time> --> <time>%s</time> (duration <time>%s</time>) | <info>%s</info>",
+			fmt.Sprintf("<fg=yellow>%s</> --> <fg=yellow>%s</> (duration <fg=yellow>%s</>) | <info>%s</>",
 				cur.StartAt.Round(time.Millisecond),
 				cur.EndAt.Round(time.Millisecond),
 				(cur.EndAt - cur.StartAt).Round(time.Millisecond),
 				strings.TrimSpace(cur.String()),
-			)),
+			),
 		}
 		for {
 			// Try to merge with next lines if threshold is set
@@ -252,12 +315,12 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs int) [
 					// Merge: extend end time, concat text
 					mergedEnd = next.EndAt
 					mergedText = strings.TrimSpace(mergedText) + " " + strings.TrimSpace(next.String())
-					mergedFrom = append(mergedFrom, ColorizeTags(fmt.Sprintf("<time>%s</time> --> <time>%s</time> (duration <time>%s</time>) | <info>%s</info>",
+					mergedFrom = append(mergedFrom, fmt.Sprintf("<fg=yellow>%s</> --> <fg=yellow>%s</> (duration <fg=yellow>%s</>) | <info>%s</>",
 						next.StartAt.Round(time.Millisecond),
 						next.EndAt.Round(time.Millisecond),
 						(next.EndAt-next.StartAt).Round(time.Millisecond),
 						strings.TrimSpace(next.String()),
-					)))
+					))
 					i++
 					continue
 				}
@@ -359,7 +422,7 @@ func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) []AudioF
 			nextRequestIds = append(nextRequestIds, items[i].Path.Id)
 		}
 
-		log.Printf("Speaking (as %s) \"%s\"\n", item.Model.name, ColorizeTags("<info>"+item.Sub.String()+"</info>"))
+		log.Printf("Speaking (as %s) \"%s\"\n", item.Model.name, item.Sub.String())
 		ttsReq := elevenlabs.TextToSpeechRequest{
 			VoiceSettings: &elevenlabs.VoiceSettings{
 				SpeakerBoost: true,
@@ -494,107 +557,3 @@ func generateFinalAudioFile(files []AudioFile, outputPath string) error {
 	return enc.Write(mixBuffer)
 }
 
-func main() {
-	parser := flags.NewParser(&opts, flags.Default)
-	parser.Usage = "[OPTIONS] <path to subtitle file>"
-	_, err := parser.Parse()
-	if err != nil {
-		os.Exit(1)
-	}
-
-	if opts.Help || opts.Positional.Path == "" {
-		printHelp(parser)
-		os.Exit(1)
-	}
-	path := opts.Positional.Path
-
-	config, err := readConfig(opts.ConfigPath)
-	if err != nil {
-		log.Fatalf("Error reading config: %v", err)
-	}
-
-	threshold := config.MergeLinesThresholdMs
-	if opts.MergeLinesThresholdMs > 0 {
-		threshold = opts.MergeLinesThresholdMs
-	}
-	if threshold > 0 {
-		log.Printf("Using merge threshold: %d", threshold)
-	} else {
-		log.Printf("No merge threshold set, not merging lines")
-	}
-
-	items := parseSubtitleFile(config, path, threshold)
-
-	client := elevenlabs.NewClient(context.Background(), config.AuthKey, 30*time.Second)
-	audioFiles := generateMissingVoiceLines(client, items)
-
-	overlaps := make([]AudioFile, 0)
-	for i, file := range audioFiles {
-		fileEndAt := file.Offset + file.Duration
-		var overlap bool
-		var overlapText string
-		if i < len(audioFiles)-1 {
-			nextFile := audioFiles[i+1]
-			overlap = fileEndAt > nextFile.Offset && file.Item.Model.model == nextFile.Item.Model.model
-			file.Overlap = fileEndAt - nextFile.Offset
-			if overlap {
-				overlapText = ColorizeTags(fmt.Sprintf(" (<warn>OVERLAP %s</warn>)", file.Overlap.Round(time.Millisecond)))
-				overlaps = append(overlaps, file)
-			}
-		}
-
-		fmt.Printf(
-			ColorizeTags(
-				"#%03d\n<info>%s</info>\nSpeaker:  <note>%s</note>, speed: %.2f\nSubtitle: <time>%s</time> --> <time>%s</time> (duration <time>%s</time>)\nAudio:    <time>%s</time> --> <time>%s</time> (duration <time>%s</time>)%s\nPath:     <debug>%s</debug>\n",
-			),
-			file.Item.Sub.Index+1,
-			file.Item.Sub.String(),
-			file.Item.Model.name,
-			file.Item.Model.speed,
-			file.Item.Sub.StartAt.Round(time.Millisecond),
-			file.Item.Sub.EndAt.Round(time.Millisecond),
-			(file.Item.Sub.EndAt - file.Item.Sub.StartAt).Round(time.Millisecond),
-			file.Offset.Round(time.Millisecond),
-			fileEndAt.Round(time.Millisecond),
-			file.Duration.Round(time.Millisecond),
-			overlapText,
-			file.Item.Path.Path,
-		)
-		// Print merged-from info if present
-		if len(file.Item.MergedFrom) > 1 {
-			fmt.Printf("Merged from:\n")
-			for _, line := range file.Item.MergedFrom {
-				parts := strings.SplitN(line, " | ", 2)
-				if len(parts) == 2 {
-					fmt.Printf(
-						ColorizeTags("    %s\n    %s\n"),
-						parts[1], parts[0],
-					)
-				} else {
-					fmt.Printf(ColorizeTags("    %s\n"), line)
-				}
-			}
-		}
-		fmt.Printf("\n")
-	}
-
-	if len(overlaps) > 0 {
-		fmt.Println(ColorizeTags("<warn>Overlaps detected:</warn>"))
-		for _, overlap := range overlaps {
-			fmt.Printf(
-				ColorizeTags("#%03d <warn>%s</warn>\n<info>%s</info>\n\n"),
-				overlap.Item.Sub.Index+1,
-				overlap.Overlap.Round(time.Millisecond),
-				overlap.Item.Sub.String(),
-			)
-		}
-		fmt.Println("Fix and rerun the script to generate the final audio file.")
-		os.Exit(1)
-	}
-
-	outputPath := strings.TrimSuffix(path, filepath.Ext(path)) + "_" + time.Now().Format("2006-01-02-15-04-05") + ".wav"
-	if err := generateFinalAudioFile(audioFiles, outputPath); err != nil {
-		log.Fatalf("Error writing final audio track: %v", err)
-	}
-	log.Printf("Final audio track written to %s\n", outputPath)
-}
