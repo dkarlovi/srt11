@@ -1,4 +1,4 @@
-version: 2
+version: 1
 
 project_name: srt11
 
@@ -21,7 +21,7 @@ builds:
       - arm64
     # Strip debug info for releases, keep for snapshots/branches
     ldflags:
-      - "{{if not .IsSnapshot}}-s -w{{end}}"
+      - "{{if not .IsSnapshot}}-s -w{{end}} -X 'main.buildDate={{ .Date }}' -X 'main.version={{ .Version }}'"
 
 archives:
   - id: default
