@@ -1,0 +1,58 @@
+version: 2
+
+project_name: srt11
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod download
+
+builds:
+  - id: srt11
+    binary: srt11
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # Strip debug info for releases, keep for snapshots/branches
+    ldflags:
+      - "{{if not .IsSnapshot}}-s -w{{end}}"
+
+archives:
+  - id: default
+    name_template: >-
+      {{ .ProjectName }}-
+      {{- if .IsSnapshot }}{{ .Branch }}-{{ .ShortCommit }}{{ else }}{{ .Version }}{{ end }}-
+      {{- .Os }}-
+      {{- .Arch }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    files:
+      - README.md
+
+checksum:
+  name_template: 'checksums.txt'
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - '^chore:'
+      - '^style:'
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: dkarlovi
+    name: srt11
+  draft: false
+  prerelease: auto
+  name_template: "{{ .Version }}"
