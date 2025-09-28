@@ -1,3 +1,6 @@
 data/
 config.yaml
 srt11
+srt11.exe
+*.zip
+dist/

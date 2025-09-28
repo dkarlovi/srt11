@@ -556,4 +556,3 @@ func generateFinalAudioFile(files []AudioFile, outputPath string) error {
 
 	return enc.Write(mixBuffer)
 }
-
