@@ -8,7 +8,7 @@ require (
 	github.com/go-audio/wav v1.1.0
 	github.com/haguro/elevenlabs-go v0.2.4
 	github.com/hajimehoshi/go-mp3 v0.3.4
-	github.com/symfony-cli/console v1.2.1
+	github.com/symfony-cli/console v1.2.2
 	gopkg.in/yaml.v3 v3.0.1
 )
 
