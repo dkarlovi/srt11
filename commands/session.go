@@ -5,25 +5,26 @@ package commands
 // spoken text separately from the original, and what was last actually
 // sent to ElevenLabs, so a session can tell which cues need regenerating.
 type SessionCue struct {
-	Index              int     `json:"index"`
-	StartMs            int     `json:"start_ms"`
-	EndMs              int     `json:"end_ms"`
-	Voice              string  `json:"voice"`
-	SourceText         string  `json:"source_text"`  // locked, original (tag stripped)
-	CurrentText        string  `json:"current_text"` // editable spoken text
-	Speed              float64 `json:"speed"`
-	SpeedOverride      bool    `json:"speed_override"`
-	LastGeneratedText  string  `json:"last_generated_text"`
-	LastGeneratedSpeed float64 `json:"last_generated_speed"`
-	HasLastGenerated   bool    `json:"has_last_generated"` // false until the first successful Generate
-	AudioMs            *int    `json:"audio_ms"`
-	CachePath          string  `json:"cache_path"`
-	OverlapFlagged     bool    `json:"overlap_flagged"`
-	NeedsHuman         bool    `json:"needs_human"`
-	HumanReason        string  `json:"human_reason"`
-	AiSuggestion       string  `json:"ai_suggestion"` // Claude's declined-but-attempted draft, see ReduceText
-	AiNote             string  `json:"ai_note"`       // Claude's reason for declining, or "" once cleared
-	Skipped            bool    `json:"skipped"`       // explicit "accept this line as-is" override, see UpdateCue
+	Index                 int     `json:"index"`
+	StartMs               int     `json:"start_ms"`
+	EndMs                 int     `json:"end_ms"`
+	Voice                 string  `json:"voice"`
+	SourceText            string  `json:"source_text"`  // locked, original (tag stripped)
+	CurrentText           string  `json:"current_text"` // editable spoken text
+	Speed                 float64 `json:"speed"`
+	SpeedOverride         bool    `json:"speed_override"`
+	LastGeneratedText     string  `json:"last_generated_text"`
+	LastGeneratedSpeed    float64 `json:"last_generated_speed"`
+	LastGeneratedProvider string  `json:"last_generated_provider"` // "elevenlabs" | "audiocpp", set by the Generate call that produced AudioMs
+	HasLastGenerated      bool    `json:"has_last_generated"`      // false until the first successful Generate
+	AudioMs               *int    `json:"audio_ms"`
+	CachePath             string  `json:"cache_path"`
+	OverlapFlagged        bool    `json:"overlap_flagged"`
+	NeedsHuman            bool    `json:"needs_human"`
+	HumanReason           string  `json:"human_reason"`
+	AiSuggestion          string  `json:"ai_suggestion"` // Claude's declined-but-attempted draft, see ReduceText
+	AiNote                string  `json:"ai_note"`       // Claude's reason for declining, or "" once cleared
+	Skipped               bool    `json:"skipped"`       // explicit "accept this line as-is" override, see UpdateCue
 }
 
 func (c *SessionCue) WindowMs() int { return c.EndMs - c.StartMs }
@@ -47,10 +48,17 @@ func (c *SessionCue) Dirty() bool {
 // Session is dub-studio's app-level unit of work: one uploaded subtitle
 // file, tracked through cleanup/generate/autofix/export.
 type Session struct {
-	Name            string         `json:"name"`
-	Cues            []*SessionCue  `json:"cues"`
-	RunCount        int            `json:"run_count"`
-	ExportWavPath   string         `json:"export_wav_path"`
+	Name          string        `json:"name"`
+	Cues          []*SessionCue `json:"cues"`
+	RunCount      int           `json:"run_count"`
+	ExportWavPath string        `json:"export_wav_path"`
+	// Provider is the TTS provider the last Generate call used ("elevenlabs"
+	// | "audiocpp"; "" before any Generate, treated as "elevenlabs"
+	// everywhere it's read). Export reuses it without asking again, so it
+	// always reproduces exactly what Generate last measured -- the same
+	// guarantee dub-studio has always made, extended to cover provider
+	// choice now that there's more than one.
+	Provider        string         `json:"provider"`
 	FirstPassReport map[string]any `json:"first_pass_report,omitempty"`
 }
 

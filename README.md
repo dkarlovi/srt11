@@ -99,6 +99,44 @@ The effective speed is part of the cache key, so each speed of a line is kept as
 
 A line with a per-line speed is treated as a branch off [request stitching](https://elevenlabs.io/docs/eleven-api/guides/how-to/text-to-speech/request-stitching) rather than a link in the chain: lines at the speaker's normal speed step over it, so changing one line's speed does not force the rest of the file to regenerate. Consecutive lines sharing the same override stitch onto each other.
 
+## TTS providers
+
+`dubstudio` supports two TTS providers behind one interface: **ElevenLabs** (the default, described throughout this README) and **[audio.cpp](https://github.com/dkarlovi/audio.cpp)**, local voice cloning via IndexTTS2 that runs entirely on your own machine. Everything below this section — speakers, speed, merge lines, overlap detection, normalization — describes the ElevenLabs provider; using audio.cpp instead changes only how each cue's audio gets synthesized.
+
+audio.cpp is off by default. To enable it, add an `audio_cpp` section to your config and give each speaker that should use it a voice reference:
+
+```yaml
+auth_key: "sk_your_auth_key"   # still required: at least one speaker may still use ElevenLabs
+default:
+  model: "model_id"
+  name: "Hana"
+  speed: 1.1
+  # A local WAV (~28s, mono) plus its exact transcript -- audio.cpp clones
+  # this voice on every request. Only used when a call selects "audiocpp".
+  voice_ref_path: "/path/to/hana.wav"
+  reference_text_path: "/path/to/hana.txt"
+models:
+  Matko:
+    model: "matko_voice_id"
+    name: "Matko"
+    voice_ref_path: "/path/to/matko.wav"
+    reference_text_path: "/path/to/matko.txt"
+
+# Never hardcoded -- the audio.cpp server must already be running here.
+audio_cpp:
+  base_url: "http://127.0.0.1:8081"
+  model: "indextts-clone"
+```
+
+The provider is chosen **per call**, not by a global switch: `run`/`session-generate`/`session-export`/`serve` all take a `--provider` flag (`elevenlabs`, the default, or `audiocpp`), and the HTTP API's `POST /generate` takes the same choice as a `"provider"` field in its JSON body. Once a session has generated with a provider, Export reuses it automatically.
+
+A few things work differently under audio.cpp:
+
+- **No speed knob.** ElevenLabs paces a line with its `speed` setting; audio.cpp instead fits each line to its exact subtitle window at synthesis time (`duration_factor`), so `speed`/per-line `@speed` tags have no effect under this provider. If a line genuinely can't be shortened enough to fit its window, the fit is clamped and the line is flagged for a human to reword — there's no speed lever left to try.
+- **No request stitching.** Every cue is synthesized independently; ElevenLabs' cross-line continuity has no equivalent here.
+- **Runs entirely on your machine, for free** — no ElevenLabs credits spent, and the audio.cpp server itself must already be running (`voice_ref_path` is a local file path, not uploaded audio, so this only works with the server on the same host as `dubstudio`).
+- **Slower.** Each cue synthesizes a "free" take, fits it, and ASR-verifies the result, retrying with a new seed on a mismatch — roughly 15-20s per cue on Apple Silicon (Metal), more on a retry.
+
 ## TTS model
 
 By default, `dubstudio` generates speech with the [`eleven_multilingual_v2`](https://elevenlabs.io/docs/models) ElevenLabs model. You can choose a different model with the optional `tts_model` field, either globally or per speaker:

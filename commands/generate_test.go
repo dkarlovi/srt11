@@ -24,7 +24,7 @@ func TestRebuildCuesAfterGenerate(t *testing.T) {
 			},
 		}
 
-		got := rebuildCuesAfterGenerate(oldCues, audioFiles, nil)
+		got := rebuildCuesAfterGenerate(oldCues, audioFiles, nil, "elevenlabs")
 		if len(got) != 2 {
 			t.Fatalf("want 2 cues, got %d", len(got))
 		}
@@ -33,6 +33,9 @@ func TestRebuildCuesAfterGenerate(t *testing.T) {
 		}
 		if !got[0].HasLastGenerated || got[0].LastGeneratedText != "hi" {
 			t.Errorf("cue 1 last-generated state = %+v", got[0])
+		}
+		if got[0].LastGeneratedProvider != "elevenlabs" {
+			t.Errorf("cue 1 LastGeneratedProvider = %q, want \"elevenlabs\"", got[0].LastGeneratedProvider)
 		}
 	})
 
@@ -51,7 +54,7 @@ func TestRebuildCuesAfterGenerate(t *testing.T) {
 			},
 		}
 
-		got := rebuildCuesAfterGenerate(oldCues, audioFiles, map[int]cueOverlap{0: {First: 0, Second: 1, Duration: 200 * time.Millisecond}})
+		got := rebuildCuesAfterGenerate(oldCues, audioFiles, map[int]cueOverlap{0: {First: 0, Second: 1, Duration: 200 * time.Millisecond}}, "elevenlabs")
 		if len(got) != 1 {
 			t.Fatalf("want 1 collapsed cue, got %d: %+v", len(got), got)
 		}

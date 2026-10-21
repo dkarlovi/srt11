@@ -85,6 +85,7 @@
   .mini{font-family:var(--mono); font-size:11px; padding:6px 11px; border-radius:7px; border:1px solid var(--line); background:var(--panel-2); color:var(--text); cursor:pointer}
   .mini.go{border-color:var(--basket); color:var(--basket)}
   .mini:hover{border-color:var(--muted)}
+  #provider-select{width:100%; font-family:var(--mono); font-size:11px; padding:6px 8px; border-radius:7px; border:1px solid var(--line); background:var(--panel-2); color:var(--text); cursor:pointer}
   .link{background:none; border:none; color:var(--basket); font-family:var(--mono); font-size:11px; cursor:pointer; padding:0}
 
   .empty{text-align:center; padding:44px 16px; color:var(--faint); border:1px dashed var(--line); border-radius:12px}
@@ -184,10 +185,16 @@
         <span class="dot"></span><span class="body"><span class="name">Clean up text</span><span class="cost">free · fillers, hedges</span></span><span class="spinner" aria-hidden="true"></span>
       </button>
 
-      <button class="step cost" id="s-gen" onclick="call('/generate','Generated')" disabled>
+      <button class="step cost" id="s-gen" onclick="generateClick()" disabled>
         <span class="dot"></span><span class="body"><span class="name">Generate</span><span class="cost">spends credits · real durations + auto speed-fix</span></span>
         <span class="pill" id="gen-pill">Run 1/10</span><span class="spinner" aria-hidden="true"></span>
       </button>
+      <div id="provider-row" style="margin:-4px 0 10px">
+        <select id="provider-select" title="TTS provider for the next Generate/regenerate">
+          <option value="elevenlabs">ElevenLabs</option>
+          <option value="audiocpp">audio.cpp (local)</option>
+        </select>
+      </div>
 
       <button class="step cost" id="s-reduce" onclick="call('/reduce','AI shortening pass')" disabled>
         <span class="dot"></span><span class="body"><span class="name">Reduce text (AI)</span><span class="cost">spends · Claude API, not ElevenLabs</span></span><span class="spinner" aria-hidden="true"></span>
@@ -251,6 +258,10 @@ function render(){
   const cap = (S && S.cap) || 10;
   document.getElementById('runN').textContent = runs;
   document.getElementById('cap').textContent = cap;
+  // Reflect whichever provider this session actually last generated with
+  // (persists across a page reload) rather than resetting the picker to
+  // ElevenLabs every render.
+  document.getElementById('provider-select').value = (S && S.provider) || 'elevenlabs';
   document.getElementById('gen-pill').textContent = 'Run ' + (runs+1) + '/' + cap;
   const meter = document.getElementById('meter'); meter.innerHTML='';
   for(let i=0;i<cap;i++){ const d=document.createElement('div');
@@ -419,10 +430,23 @@ async function doUpload(input){
     input.value='';
   } finally { clearBusy(); }
 }
-async function call(url, okMsg){
+// generateClick sends the provider picker's current value as the request
+// body -- dkarlovi's requirement that either TTS provider can be requested
+// per-request through the API, not only by a global config switch.
+// ElevenLabs is sent as an explicit "elevenlabs", never "": the server
+// reads "" as "reuse the session's last provider", so "" could never
+// switch back from audio.cpp.
+function generateClick(){
+  const provider = document.getElementById('provider-select').value;
+  call('/generate', 'Generated', {provider});
+}
+
+async function call(url, okMsg, body){
   setBusy(STEP_BY_URL[url], BUSY_LABEL[url]);
   try{
-    const r = await fetch(url,{method:'POST'});
+    const opts = {method:'POST'};
+    if(body){ opts.headers = {'Content-Type':'application/json'}; opts.body = JSON.stringify(body); }
+    const r = await fetch(url, opts);
     if(r.status===429){ toast('⛔ ' + (await r.json()).detail, {error:true, sticky:true}); await refresh(); return; }
     if(r.status===409){ toast('⚠ ' + (await r.json()).detail, {error:true, sticky:true}); await refresh(); return; }
     if(!r.ok){ let msg; try{ msg=(await r.json()).detail; }catch(e){ msg=await r.text(); } toast('Failed: '+msg, {error:true, sticky:true}); return; }
@@ -431,6 +455,7 @@ async function call(url, okMsg){
     if(url==='/generate' && S.last_run){ const g=S.last_run;
       extra = g.generated.length ? ' · billed '+g.generated.length+', cached '+g.skipped_cached : ' · nothing changed, 0 credits';
       extra += ' · auto-sped '+g.auto_sped+', '+g.still_basketed+' still flagged';
+      extra += ' · via '+(g.provider||'elevenlabs');
       if(g.overlap_conflict) extra += ' · overlaps still block export'; }
     if(url==='/reduce' && S.last_reduce){ const rd=S.last_reduce;
       extra = ' · shortened '+rd.shortened.length+', declined '+rd.declined.length; }

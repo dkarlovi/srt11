@@ -29,6 +29,11 @@ func sessionServiceConfig(c *console.Context, engine *Config) ServiceConfig {
 		OverlapToleranceMs: c.Int("overlap-tolerance-ms"),
 		NormalizeTargetDb:  c.Int("normalize-target-db"),
 		RunCap:             c.Int("run-cap"),
+		// Generate runs AutoFix internally; without this the session-*
+		// commands ran it with a zero-value config (0ms tolerance, no speed
+		// caps) while serve used these defaults. serve still overrides it
+		// with --autofix-config when given.
+		AutoFix: builtinAutoFixConfig(),
 		Reduce: ReduceServiceConfig{
 			APIKey: c.String("anthropic-api-key"),
 			Model:  c.String("reduce-model"),
@@ -147,7 +152,7 @@ func runSessionGenerate(c *console.Context) error {
 	}
 
 	ls := NewLocalService(sessionServiceConfig(c, engine))
-	result, err := ls.Generate(session)
+	result, err := ls.Generate(session, c.String("provider"))
 	if err != nil {
 		return console.Exit(fmt.Sprintf("Error generating: %v", err), 1)
 	}

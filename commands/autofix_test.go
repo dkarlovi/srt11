@@ -85,6 +85,27 @@ func TestAutoFixDurations(t *testing.T) {
 		}
 	})
 
+	t.Run("an audiocpp cue over budget is basketed, never speed-bumped -- that provider has no speed lever", func(t *testing.T) {
+		c1 := autoFixCue(1, 0, 2000, "hana", ms(2350)) // same overage as the "moderate overage" case above, which sped it up for elevenlabs
+		c1.Provider = "audiocpp"
+		c2 := autoFixCue(2, 2200, 4000, "hana", ms(1500))
+		result := AutoFixDurations([]*AutoFixCue{c1, c2}, defaultAutoFixConfig())
+		if len(result.Sped) != 0 {
+			t.Fatalf("want no speed bump for an audiocpp cue, got %+v", result.Sped)
+		}
+		if len(result.Basketed) != 1 || result.Basketed[0].Index != 1 {
+			t.Fatalf("want cue 1 basketed, got %+v", result)
+		}
+		if c1.Speed != 1.0 || c1.SpeedOverride {
+			t.Errorf("cue 1 speed = %+v, want untouched (audio.cpp ignores it)", c1)
+		}
+		// Not "clamped": a model without fit_duration (e.g. Higgs) never
+		// fitted the take at all, so that explanation would be wrong.
+		if !strings.Contains(c1.HumanReason, "no speed control") || strings.Contains(c1.HumanReason, "cap") {
+			t.Errorf("human_reason = %q, want it to explain audio.cpp has no speed control, not mention a speed cap", c1.HumanReason)
+		}
+	})
+
 	t.Run("an overage past the speaker cap is basketed not sped", func(t *testing.T) {
 		cues := []*AutoFixCue{
 			autoFixCue(1, 0, 2000, "hana", ms(2500)),

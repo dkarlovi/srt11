@@ -17,3 +17,23 @@ models:
         name: "Joe"
         # Optional: per-speaker TTS model override (falls back to top-level tts_model)
         # tts_model: "eleven_flash_v2_5"
+        # Optional: this speaker's voice for the audiocpp provider (see
+        # audio_cpp below). Only used on a Generate/Export call that
+        # requests provider "audiocpp"; ElevenLabs-only setups can omit both.
+        # voice_ref_path: "/path/to/joe.wav"
+        # reference_text_path: "/path/to/joe.txt"
+
+# Optional: enables the "audiocpp" TTS provider (local voice cloning via
+# IndexTTS2, github.com/dkarlovi/audio.cpp), selectable per Generate/Export
+# request alongside the default "elevenlabs" provider. Omit this section
+# entirely to disable audiocpp -- the feature is off by default and
+# ElevenLabs behavior is unchanged either way. The audio.cpp server must
+# already be running on this same machine (it's a local file-path API, not
+# uploaded audio) before a request can use it.
+# audio_cpp:
+#     base_url: "http://127.0.0.1:8081"
+#     model: "indextts-clone"
+#     # Fit each take to its cue's window via duration_factor. Only IndexTTS
+#     # supports this; leave it off for other models (e.g. Higgs), which
+#     # ignore the factor.
+#     fit_duration: true
