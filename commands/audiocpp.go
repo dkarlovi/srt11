@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -637,45 +638,27 @@ func (p *audioCppProvider) synthesizeTakeFit(item Item) (string, time.Duration, 
 		return "", 0, fmt.Errorf("cue #%d (%s): voice_ref_path/reference_text_path not configured for this speaker", cue, item.Model.name)
 	}
 
-	type take struct {
-		samples []float64
-		rate    int
-		rawDur  time.Duration
-		misses  int
+	dir, err := p.takeCacheDir(item)
+	if err != nil {
+		return "", 0, err
 	}
-	var takes []take
+	var takes []cleanedTake
 	var cands []takeCandidate
 	var lastErr error
 	nWords := max(1, len(words(text)))
 	for seed := 1; seed <= p.takes; seed++ {
-		audio, rawDur, err := p.speak(text, seed, voiceRef, refText, nil)
-		if err == nil {
-			var x []float64
-			var rate int
-			x, rate, err = decodeWavFloat(audio)
-			if err == nil {
-				var ws []asrWord
-				var asrRate int
-				_, ws, asrRate, err = p.transcribeDetails(audio)
-				if err == nil {
-					x = cleanTake(x, rate, scaleWordSamples(ws, asrWordRate(ws, asrRate, len(x), rate), rate))
-					var heard string
-					heard, err = p.transcribe(encodeWavFloat(x, rate))
-					if err == nil {
-						misses := wordMisses(heard, text)
-						takes = append(takes, take{x, rate, rawDur, misses})
-						cands = append(cands, takeCandidate{
-							Seed: seed,
-							Dur:  time.Duration(float64(len(x)) / float64(rate) * float64(time.Second)),
-							WER:  float64(misses) / float64(nWords),
-						})
-						continue
-					}
-				}
-			}
+		tk, err := p.cleanedTakeFor(dir, text, seed, voiceRef, refText)
+		if err != nil {
+			lastErr = err
+			log.Printf("audio.cpp cue #%d: take %d failed, skipping: %v", cue, seed, err)
+			continue
 		}
-		lastErr = err
-		log.Printf("audio.cpp cue #%d: take %d failed, skipping: %v", cue, seed, err)
+		takes = append(takes, tk)
+		cands = append(cands, takeCandidate{
+			Seed: seed,
+			Dur:  time.Duration(float64(len(tk.samples)) / float64(tk.rate) * float64(time.Second)),
+			WER:  float64(tk.Misses) / float64(nWords),
+		})
 	}
 
 	best := selectTake(cands, window)
@@ -703,7 +686,98 @@ func (p *audioCppProvider) synthesizeTakeFit(item Item) (string, time.Duration, 
 		return "", 0, fmt.Errorf("reading duration of %s: %w", path, err)
 	}
 	log.Printf("Wrote %s (audio.cpp take fit: seed %d of %d ok, %d word misses, raw %s, cleaned %s, window %s, room %s, speed-up %.3f)\n",
-		path, c.Seed, len(cands), chosen.misses, chosen.rawDur.Round(time.Millisecond), c.Dur.Round(time.Millisecond),
+		path, c.Seed, len(cands), chosen.Misses, chosen.RawDur.Round(time.Millisecond), c.Dur.Round(time.Millisecond),
 		window, room, factor)
 	return path, dur, nil
+}
+
+// cleanedTake is one take after cleanTake, plus what selection needs. It
+// is cached on disk by takeCacheDir/cleanedTakeFor, keyed without the
+// window or room: those only decide which cached take is picked and how
+// far it's stretched, so a retime (AutoFix starting a line earlier, which
+// also shrinks the previous line's room) rebuilds the final file from
+// these without calling the server -- and Export keeps playing takes that
+// Generate measured.
+type cleanedTake struct {
+	samples []float64
+	rate    int
+	Misses  int           `json:"misses"`
+	RawDur  time.Duration `json:"raw_duration"`
+	Failed  string        `json:"failed,omitempty"` // the error, for a seed the server couldn't produce
+}
+
+// takeCacheDir is where item's cleaned takes live: next to the final
+// takes, keyed on everything that changes a take except the window and
+// room.
+func (p *audioCppProvider) takeCacheDir(item Item) (string, error) {
+	refHash, err := p.voiceRefContentHash(item.Model.voiceRefPath)
+	if err != nil {
+		return "", err
+	}
+	text := item.Sub.String()
+	sum := md5.Sum([]byte(refHash + item.Model.referenceText + p.model + takeFitVersion + text))
+	dir := filepath.Join(filepath.Dir(item.Path.Template),
+		fmt.Sprintf("%X-%s-%s.takes", sum[:4], item.Model.name, audioCppSlug(text)))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("creating take cache %s: %w", dir, err)
+	}
+	return dir, nil
+}
+
+// cleanedTakeFor returns seed's cleaned take from dir, or speaks, cleans,
+// scores and caches it. A seed that failed is cached as failed too, so a
+// rebuild never goes back to the server for it.
+func (p *audioCppProvider) cleanedTakeFor(dir, text string, seed int, voiceRef, refText string) (cleanedTake, error) {
+	metaPath := filepath.Join(dir, fmt.Sprintf("seed%d.json", seed))
+	wavPath := filepath.Join(dir, fmt.Sprintf("seed%d.wav", seed))
+	var tk cleanedTake
+	if meta, err := os.ReadFile(metaPath); err == nil && json.Unmarshal(meta, &tk) == nil {
+		if tk.Failed != "" {
+			return tk, errors.New(tk.Failed)
+		}
+		if b, err := os.ReadFile(wavPath); err == nil {
+			if tk.samples, tk.rate, err = decodeWavFloat(b); err == nil {
+				return tk, nil
+			}
+		}
+	}
+
+	tk, err := p.makeCleanedTake(text, seed, voiceRef, refText)
+	if err != nil {
+		var apiErr *audioCppAPIError
+		if !errors.As(err, &apiErr) {
+			return tk, err // transient (server down, timeout): try again next time
+		}
+		tk.Failed = err.Error()
+	} else if err := os.WriteFile(wavPath, encodeWavFloat(tk.samples, tk.rate), 0o644); err != nil {
+		return tk, fmt.Errorf("writing %s: %w", wavPath, err)
+	}
+	meta, _ := json.Marshal(tk)
+	if werr := os.WriteFile(metaPath, meta, 0o644); werr != nil {
+		return tk, fmt.Errorf("writing %s: %w", metaPath, werr)
+	}
+	return tk, err
+}
+
+// makeCleanedTake speaks one free take, cuts and tightens it at its word
+// timings, and scores the cleaned result by ASR (spec steps 1-4).
+func (p *audioCppProvider) makeCleanedTake(text string, seed int, voiceRef, refText string) (cleanedTake, error) {
+	audio, rawDur, err := p.speak(text, seed, voiceRef, refText, nil)
+	if err != nil {
+		return cleanedTake{}, err
+	}
+	x, rate, err := decodeWavFloat(audio)
+	if err != nil {
+		return cleanedTake{}, err
+	}
+	_, ws, asrRate, err := p.transcribeDetails(audio)
+	if err != nil {
+		return cleanedTake{}, err
+	}
+	x = cleanTake(x, rate, scaleWordSamples(ws, asrWordRate(ws, asrRate, len(x), rate), rate))
+	heard, err := p.transcribe(encodeWavFloat(x, rate))
+	if err != nil {
+		return cleanedTake{}, err
+	}
+	return cleanedTake{samples: x, rate: rate, Misses: wordMisses(heard, text), RawDur: rawDur}, nil
 }

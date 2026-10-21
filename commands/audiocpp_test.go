@@ -534,6 +534,42 @@ func TestAudioCppProvider_SynthesizeTakeFit(t *testing.T) {
 		}
 	})
 
+	t.Run("a new window or room is rebuilt from cached takes, without the server", func(t *testing.T) {
+		// AutoFix retimes cues inside Generate; Export must not then make
+		// new, unmeasured takes for them (or for the cue before them).
+		fake := &audioCppTestServer{speakDurMs: []int{4000, 2800, 3500}, transcripts: []string{text}}
+		srv := httptest.NewServer(fake.handler(t))
+		defer srv.Close()
+		p := newAudioCppProvider(AudioCppConfig{BaseURL: srv.URL, TakeFit: true, Takes: 3})
+		cacheDir := t.TempDir()
+
+		sub := &astisub.Item{StartAt: 0, EndAt: 3 * time.Second,
+			Lines: []astisub.Line{{Items: []astisub.LineItem{{Text: text}}}}}
+		model := Model{name: "Hana", voiceRefPath: voiceRef, referenceText: "ref", roomMs: 3000}
+		first := []Item{{Sub: sub, Model: model, Path: p.CachePath(cacheDir, sub, model)}}
+		if _, _, err := p.Synthesize(first, 0); err != nil {
+			t.Fatalf("first Synthesize: %v", err)
+		}
+		calls := fake.speakCalls
+
+		moved := &astisub.Item{StartAt: -500 * time.Millisecond, EndAt: 3 * time.Second, Lines: sub.Lines}
+		model.roomMs = 3200
+		second := []Item{{Sub: moved, Model: model, Path: p.CachePath(cacheDir, moved, model)}}
+		if second[0].Path.Template == first[0].Path.Template {
+			t.Fatal("test setup: want a different final cache key")
+		}
+		path, _, err := p.Synthesize(second, 0)
+		if err != nil {
+			t.Fatalf("second Synthesize: %v", err)
+		}
+		if fake.speakCalls != calls {
+			t.Errorf("speakCalls = %d after the retime, want %d (no new takes)", fake.speakCalls, calls)
+		}
+		if !strings.Contains(path, ".3.wav") {
+			t.Errorf("path = %s, want seed 3 (3.5 s is nearest the new 3.5 s window)", path)
+		}
+	})
+
 	t.Run("a take longer than its room is sped up by 8 % at most", func(t *testing.T) {
 		fake := &audioCppTestServer{speakDurMs: []int{4000}, transcripts: []string{text}}
 		srv := httptest.NewServer(fake.handler(t))

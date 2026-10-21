@@ -129,6 +129,14 @@ cache path is computed in a second pass: after the loop, for each item, recomput
 `room` from `items[i+1]`. To keep the `TTSProvider` interface unchanged, the room is passed in on the
 `Model` (new field `roomMs`, set in that second pass, zero for every other provider and mode).
 
+**Take cache (added after the final review).** AutoFix retimes cues inside Generate (an earlier start),
+which changes the cue's window and the previous cue's room. With only the key above, Export then made new,
+unmeasured takes for both. So each cleaned take is also cached, with its ASR misses, in
+`<cache>/<hash>-<speaker>-<slug>.takes/seed<k>.{wav,json}`, keyed on reference hash, reference text, model,
+`takeFitVersion` and text — no window, no room. A changed window or room rebuilds the final file from these
+(selection, stretch, fades) with no server calls. A seed that failed with a 4xx is cached as failed; a
+transient failure is not, so it is tried again.
+
 ## Error handling
 
 - One failed take: logged, skipped.
