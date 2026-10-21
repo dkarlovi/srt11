@@ -21,7 +21,7 @@ func (s *stubService) Upload(name, path string) (*Session, []TagViolation, error
 	return &Session{Name: name}, nil, nil
 }
 func (s *stubService) Cleanup(*Session) []CueEdit { return nil }
-func (s *stubService) Generate(*Session) (GenerateResult, error) {
+func (s *stubService) Generate(*Session, string) (GenerateResult, error) {
 	return GenerateResult{}, s.generateErr
 }
 func (s *stubService) AutoFix(*Session) AutoFixResult        { return AutoFixResult{} }

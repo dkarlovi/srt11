@@ -359,7 +359,22 @@ func (h *httpServer) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := t.service.Generate(t.session)
+	// provider selects the TTS provider for this call -- dkarlovi's
+	// requirement that either provider can be requested per-request
+	// through the API. Omitted or "" reuses whatever this session last
+	// used, defaulting to ElevenLabs (see LocalService.Generate).
+	var payload struct {
+		Provider string `json:"provider"`
+	}
+	if r.Body != nil {
+		defer r.Body.Close()
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil && err != io.EOF {
+			writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+			return
+		}
+	}
+
+	result, err := t.service.Generate(t.session, payload.Provider)
 	if err != nil {
 		writeError(w, generateErrorStatus(err), err.Error())
 		return
@@ -546,12 +561,18 @@ func generateErrorStatus(err error) int {
 	if errors.Is(err, ErrRunCapReached) {
 		return http.StatusTooManyRequests
 	}
+	if errors.Is(err, ErrProviderNotConfigured) {
+		return http.StatusBadRequest
+	}
 	return http.StatusBadGateway
 }
 
 func exportErrorStatus(err error) int {
 	if errors.Is(err, ErrExportBlocked) {
 		return http.StatusConflict
+	}
+	if errors.Is(err, ErrProviderNotConfigured) {
+		return http.StatusBadRequest
 	}
 	return http.StatusBadGateway
 }
@@ -639,6 +660,7 @@ func sessionDTO(s *Session, toleranceMs, runCap int) map[string]any {
 		"mode":            "real",
 		"generated":       s.Generated(),
 		"export_wav_path": s.ExportWavPath,
+		"provider":        s.Provider,
 		"counts": map[string]any{
 			"total":       len(s.Cues),
 			"flagged":     flaggedCount,

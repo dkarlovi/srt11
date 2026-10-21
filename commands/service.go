@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -9,8 +8,6 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
-
-	"github.com/haguro/elevenlabs-go"
 )
 
 // Sentinel errors the HTTP layer classifies on. Generate and Export can
@@ -79,7 +76,13 @@ type ExportResult struct {
 type Service interface {
 	Upload(name, path string) (*Session, []TagViolation, error)
 	Cleanup(s *Session) []CueEdit
-	Generate(s *Session) (GenerateResult, error)
+	// Generate spends a run. provider selects the TTS provider for this
+	// call ("elevenlabs" | "audiocpp" | "" to reuse whatever the session
+	// last used, defaulting to "elevenlabs" if it's never generated before)
+	// -- dkarlovi's requirement that either provider can be requested
+	// per-request through the API, not only by a global config switch. The
+	// choice is persisted on Session.Provider and Export reuses it.
+	Generate(s *Session, provider string) (GenerateResult, error)
 	AutoFix(s *Session) AutoFixResult
 	Reduce(s *Session) (ReduceResult, error)
 	Export(s *Session) (ExportResult, error)
@@ -124,16 +127,30 @@ func (ls *LocalService) sessionVTTPath() string {
 	return filepath.Join(ls.cfg.WorkDir, "_session.vtt")
 }
 
-func (ls *LocalService) writeAndParse(cues []*SessionCue) ([]Item, error) {
+func (ls *LocalService) writeAndParse(cues []*SessionCue, provider TTSProvider) ([]Item, error) {
 	vttPath := ls.sessionVTTPath()
 	if err := os.WriteFile(vttPath, writeSessionVTT(cues, ls.cfg.Engine.Default.Name), 0o644); err != nil {
 		return nil, fmt.Errorf("writing session vtt: %w", err)
 	}
-	return parseSubtitleFile(ls.cfg.Engine, vttPath, ls.cfg.MergeThresholdMs, ls.cfg.MergeMaxMs, ls.cfg.CacheDir), nil
+	return parseSubtitleFile(ls.cfg.Engine, vttPath, ls.cfg.MergeThresholdMs, ls.cfg.MergeMaxMs, ls.cfg.CacheDir, provider), nil
 }
 
-func (ls *LocalService) elevenLabsClient() *elevenlabs.Client {
-	return elevenlabs.NewClient(context.Background(), ls.cfg.Engine.AuthKey, 30*time.Second)
+// ErrProviderNotConfigured means the caller asked for a TTS provider this
+// server has no config.yaml settings for -- a request/config problem, not
+// an upstream failure, so the HTTP layer maps it to 400 rather than 502.
+var ErrProviderNotConfigured = errors.New("provider not configured")
+
+// resolveProvider is the session-layer equivalent of the package-level
+// resolveProvider in run.go (used by the standalone run/CLI commands) --
+// same provider names, same config.yaml fields, wrapped so its error can be
+// classified as caller-fault by the HTTP layer (see ErrProviderNotConfigured
+// and generateErrorStatus).
+func (ls *LocalService) resolveProvider(name string) (TTSProvider, error) {
+	provider, err := resolveProvider(name, ls.cfg.Engine)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrProviderNotConfigured, err)
+	}
+	return provider, nil
 }
 
 // maxConvergenceRounds caps how many internal speed-bump-then-remeasure
@@ -184,21 +201,21 @@ func aggregateGenerateRounds(rounds []generateRoundResult) GenerateResult {
 	}
 }
 
-// generateOnce is one ElevenLabs round: parse+merge the current cues,
-// synthesize whatever isn't already cached, measure real durations, and
-// detect overlaps. Ported from dub-studio's core.generate_cues, adapted
+// generateOnce is one TTS round against provider: parse+merge the current
+// cues, synthesize whatever isn't already cached, measure real durations,
+// and detect overlaps. Ported from dub-studio's core.generate_cues, adapted
 // from subprocess+report-text scraping to direct in-process calls and
-// struct access. Not independently unit-tested (it needs a real
-// ElevenLabs client) -- verified live, same as the rest of this file's
-// network-touching code; aggregateGenerateRounds above carries the
-// orchestration logic that *is* unit-tested.
-func (ls *LocalService) generateOnce(s *Session) (generateRoundResult, error) {
-	items, err := ls.writeAndParse(s.Cues)
+// struct access. Not independently unit-tested (it needs a real provider
+// client) -- verified live, same as the rest of this file's network-touching
+// code; aggregateGenerateRounds above carries the orchestration logic that
+// *is* unit-tested.
+func (ls *LocalService) generateOnce(s *Session, provider TTSProvider) (generateRoundResult, error) {
+	items, err := ls.writeAndParse(s.Cues, provider)
 	if err != nil {
 		return generateRoundResult{}, err
 	}
 
-	audioFiles, err := generateMissingVoiceLines(ls.elevenLabsClient(), items)
+	audioFiles, err := generateMissingVoiceLines(provider, items)
 	if err != nil {
 		return generateRoundResult{}, err
 	}
@@ -206,7 +223,7 @@ func (ls *LocalService) generateOnce(s *Session) (generateRoundResult, error) {
 	overlapTolerance := time.Duration(ls.cfg.OverlapToleranceMs) * time.Millisecond
 	overlapsByFirst, overlaps := annotateOverlaps(audioFiles, findOverlaps(audioFiles, overlapTolerance))
 
-	s.Cues = rebuildCuesAfterGenerate(s.Cues, audioFiles, overlapsByFirst)
+	s.Cues = rebuildCuesAfterGenerate(s.Cues, audioFiles, overlapsByFirst, provider.Name())
 
 	billedPositions := make([]int, 0)
 	for i, item := range items {
@@ -268,15 +285,30 @@ func runConvergenceLoop(generate func() (generateRoundResult, error), autoFix fu
 // increments RunCount ONCE per Generate call, regardless of how many
 // internal rounds ran -- from the user's perspective they asked for one
 // generation, not several.
-func (ls *LocalService) Generate(s *Session) (GenerateResult, error) {
+func (ls *LocalService) Generate(s *Session, providerName string) (GenerateResult, error) {
 	if ls.cfg.RunCap > 0 && s.RunCount >= ls.cfg.RunCap {
 		return GenerateResult{}, fmt.Errorf(
 			"%w (%d generations for this video); no audio was generated, reset the session to continue",
 			ErrRunCapReached, ls.cfg.RunCap)
 	}
 
+	// "" means "whatever this session used last" (first-ever Generate on a
+	// fresh session falls through to "elevenlabs", resolveProvider's own
+	// default) -- so a caller that never mentions provider gets ElevenLabs
+	// unchanged, and a caller that picked audio.cpp once doesn't have to
+	// keep repeating it on every regenerate.
+	effectiveProvider := providerName
+	if effectiveProvider == "" {
+		effectiveProvider = s.Provider
+	}
+	provider, err := ls.resolveProvider(effectiveProvider)
+	if err != nil {
+		return GenerateResult{}, err
+	}
+	s.Provider = provider.Name()
+
 	rounds, afResults, err := runConvergenceLoop(
-		func() (generateRoundResult, error) { return ls.generateOnce(s) },
+		func() (generateRoundResult, error) { return ls.generateOnce(s, provider) },
 		func() AutoFixResult { return ls.AutoFix(s) },
 	)
 	if err != nil {
@@ -288,6 +320,7 @@ func (ls *LocalService) Generate(s *Session) (GenerateResult, error) {
 		s.RunCount++
 	}
 	result.RunNumber = s.RunCount
+	result.Provider = provider.Name()
 
 	spedCues := map[int]bool{}
 	for _, af := range afResults {
@@ -346,17 +379,24 @@ func buildExportResult(cues []*SessionCue, overlaps []cueOverlap) (ExportResult,
 	return ExportResult{StillOverBudget: stillOver, Basket: basket}, nil
 }
 
-// Export re-runs the identical generation as Generate (free: the cache
-// means a matching prior generate already paid for every cue) so the
-// exported audio matches exactly what was measured, then mixes the final
-// WAV if nothing overlaps past tolerance. Ported from dub-studio's
-// core.export_audio.
+// Export re-runs the identical generation as Generate, against the same
+// provider Generate last used (Session.Provider -- never asked again, so
+// it can't silently drift to a different provider's audio between the two)
+// -- free (the cache means a matching prior generate already paid for
+// every cue) so the exported audio matches exactly what was measured, then
+// mixes the final WAV if nothing overlaps past tolerance. Ported from
+// dub-studio's core.export_audio.
 func (ls *LocalService) Export(s *Session) (ExportResult, error) {
-	items, err := ls.writeAndParse(s.Cues)
+	provider, err := ls.resolveProvider(s.Provider)
 	if err != nil {
 		return ExportResult{}, err
 	}
-	audioFiles, err := generateMissingVoiceLines(ls.elevenLabsClient(), items)
+
+	items, err := ls.writeAndParse(s.Cues, provider)
+	if err != nil {
+		return ExportResult{}, err
+	}
+	audioFiles, err := generateMissingVoiceLines(provider, items)
 	if err != nil {
 		return ExportResult{}, err
 	}
@@ -371,7 +411,7 @@ func (ls *LocalService) Export(s *Session) (ExportResult, error) {
 
 	outputPath := filepath.Join(ls.cfg.WorkDir,
 		s.Name+"_"+time.Now().Format("2006-01-02-15-04-05")+".wav")
-	if err := generateFinalAudioFile(audioFiles, outputPath, float64(ls.cfg.NormalizeTargetDb)); err != nil {
+	if err := generateFinalAudioFile(provider, audioFiles, outputPath, float64(ls.cfg.NormalizeTargetDb)); err != nil {
 		return ExportResult{}, fmt.Errorf("writing final audio track: %w", err)
 	}
 	s.ExportWavPath = outputPath
@@ -414,6 +454,7 @@ func toAutoFixCues(cues []*SessionCue) []*AutoFixCue {
 			Index: c.Index, StartMs: c.StartMs, EndMs: c.EndMs, Voice: c.Voice,
 			Speed: c.Speed, SpeedOverride: c.SpeedOverride, AudioMs: c.AudioMs,
 			OverlapFlagged: c.OverlapFlagged, Skipped: c.Skipped,
+			Provider: c.LastGeneratedProvider,
 		})
 	}
 	return out

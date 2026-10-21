@@ -1,25 +1,19 @@
 package commands
 
 import (
-	"context"
-	"crypto/md5"
 	"errors"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
 	"math"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/asticode/go-astisub"
 	"github.com/go-audio/audio"
 	"github.com/go-audio/wav"
-	"github.com/haguro/elevenlabs-go"
-	"github.com/hajimehoshi/go-mp3"
 	"github.com/symfony-cli/console"
 	"gopkg.in/yaml.v3"
 )
@@ -29,6 +23,18 @@ type SpeakerConfig struct {
 	Name     string  `yaml:"name"`
 	Speed    float32 `yaml:"speed"`
 	TTSModel string  `yaml:"tts_model"` // optional: ElevenLabs model ID override for this speaker
+
+	// audio.cpp fields, used only when the audiocpp provider is selected
+	// for a Generate/Export call. VoiceRefPath is a local WAV file (the
+	// audio.cpp server always runs on the same machine, per Matko's
+	// 2026-09-22 decision -- see HANDOFF-audiocpp.local.md -- so this is a
+	// plain path, not something uploaded). ReferenceTextPath is that WAV's
+	// exact transcript, sent as reference_text; audio.cpp requires it and
+	// silently produces near-silence without it (FINDINGS §3), so it's
+	// loaded from disk once at parse time rather than trusted to be right
+	// inline in this YAML.
+	VoiceRefPath      string `yaml:"voice_ref_path"`
+	ReferenceTextPath string `yaml:"reference_text_path"`
 }
 
 type Config struct {
@@ -37,6 +43,15 @@ type Config struct {
 	Default               SpeakerConfig            `yaml:"default"`
 	Models                map[string]SpeakerConfig `yaml:"models"`
 	MergeLinesThresholdMs int                      `yaml:"merge_lines_threshold_ms"` // optional
+	AudioCpp              *AudioCppConfig          `yaml:"audio_cpp"`                // optional: nil disables the audiocpp provider entirely
+}
+
+// AudioCppConfig configures the audio.cpp TTS provider. Never hardcode a
+// base URL elsewhere (dkarlovi's requirement #3) -- this is the only place
+// it comes from.
+type AudioCppConfig struct {
+	BaseURL string `yaml:"base_url"` // e.g. "http://127.0.0.1:8081"
+	Model   string `yaml:"model"`    // e.g. "indextts-clone"
 }
 
 // defaultTTSModel is used when no tts_model is set anywhere in the config.
@@ -61,6 +76,10 @@ type Model struct {
 	offset   int
 	speed    float32
 	ttsModel string
+
+	// audio.cpp fields (empty when this speaker/call uses ElevenLabs).
+	voiceRefPath  string
+	referenceText string // loaded contents of the speaker's ReferenceTextPath
 }
 
 type Path struct {
@@ -121,6 +140,11 @@ func All() []*console.Command {
 					Name:         "normalize-target-db",
 					Usage:        "Gain each cue toward this RMS level (dBFS) before mixing, evening out level swings between ElevenLabs generations; 0 or above disables normalization",
 					DefaultValue: -20,
+				},
+				&console.StringFlag{
+					Name:         "provider",
+					Usage:        "TTS provider: \"elevenlabs\" (default) or \"audiocpp\" (requires audio_cpp.base_url in config)",
+					DefaultValue: "elevenlabs",
 				},
 			},
 			Action: Run,
@@ -284,6 +308,10 @@ func sessionGenerationFlags() []console.Flag {
 			Usage:        "Refuse to Generate past this many runs for the session (0 = unlimited)",
 			DefaultValue: 10,
 		},
+		&console.StringFlag{
+			Name:  "provider",
+			Usage: "TTS provider for this Generate call: \"elevenlabs\" (default) or \"audiocpp\"; empty reuses whatever the session last used",
+		},
 	}
 }
 
@@ -346,10 +374,14 @@ func Run(c *console.Context) error {
 		log.Printf("Normalization disabled")
 	}
 
-	items := parseSubtitleFile(config, path, threshold, mergeMaxMs, "")
+	provider, err := resolveProvider(c.String("provider"), config)
+	if err != nil {
+		return console.Exit(fmt.Sprintf("Error resolving TTS provider: %v", err), 1)
+	}
 
-	client := elevenlabs.NewClient(context.Background(), config.AuthKey, 30*time.Second)
-	audioFiles, err := generateMissingVoiceLines(client, items)
+	items := parseSubtitleFile(config, path, threshold, mergeMaxMs, "", provider)
+
+	audioFiles, err := generateMissingVoiceLines(provider, items)
 	if err != nil {
 		return console.Exit(fmt.Sprintf("Error generating audio: %v", err), 1)
 	}
@@ -437,7 +469,7 @@ func Run(c *console.Context) error {
 	}
 
 	outputPath := strings.TrimSuffix(path, filepath.Ext(path)) + "_" + time.Now().Format("2006-01-02-15-04-05") + ".wav"
-	if err := generateFinalAudioFile(audioFiles, outputPath, float64(normalizeTargetDb)); err != nil {
+	if err := generateFinalAudioFile(provider, audioFiles, outputPath, float64(normalizeTargetDb)); err != nil {
 		return console.Exit(fmt.Sprintf("Error writing final audio track: %v", err), 1)
 	}
 	log.Printf("Final audio track written to %s\n", outputPath)
@@ -466,6 +498,27 @@ func readConfig(filename string) (*Config, error) {
 	return &config, nil
 }
 
+// loadReferenceText reads an audio.cpp voice's reference transcript
+// (SpeakerConfig.ReferenceTextPath), memoized in cache since the same
+// speaker's file is read once per cue that speaker has. audio.cpp requires
+// reference_text and silently produces near-silence without it (FINDINGS
+// §3), so an empty or missing path is a hard error, not a quiet fallback.
+func loadReferenceText(path string, cache map[string]string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("reference_text_path is not set")
+	}
+	if text, ok := cache[path]; ok {
+		return text, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	text := strings.TrimSpace(string(data))
+	cache[path] = text
+	return text, nil
+}
+
 func generateModelChannelMap(config *Config) map[string]int {
 	channels := make(map[string]int)
 	// Default model always goes to channel 0
@@ -482,47 +535,24 @@ func generateModelChannelMap(config *Config) map[string]int {
 	return channels
 }
 
-func generatePathTemplate(root string, item *astisub.Item, model Model) Path {
-	re := regexp.MustCompile(`[,.!?'<>:"/\\|?*\x00-\x1F]`)
-	dialog := re.ReplaceAllString(item.String(), "")
-	dialog = strings.ToLower(dialog)
-	dialog = strings.Replace(dialog, " ", "_", -1)
-	dialog = strings.TrimSpace(dialog)
-	if runes := []rune(dialog); len(runes) > 50 {
-		// Truncate by rune, not byte: a byte slice can land mid-character on
-		// multi-byte UTF-8 text (em dashes, curly quotes, accented letters),
-		// producing an invalid UTF-8 filename that breaks any consumer
-		// decoding this program's output as UTF-8 (e.g. Python's
-		// subprocess.run(..., text=True)).
-		dialog = string(runes[:50])
-	}
-
-	// Everything that changes the produced audio goes into the checksum: voice
-	// ID, TTS model, effective speed (per-speaker or per-line) and the text. A
-	// cache hit is therefore just this hash plus a lookup on disk.
-	checksum := md5.Sum([]byte(model.model + model.ttsModel + fmt.Sprintf("%f", model.speed) + item.String()))
-	template := filepath.Join(root, fmt.Sprintf("%X-%s-%s.%%s.mp3", checksum[:4], model.name, dialog))
-
-	glob := fmt.Sprintf(template, "*")
-	if files, err := filepath.Glob(glob); err == nil && len(files) > 0 {
-		chosen := files[0]
-		if len(files) > 1 {
-			if newest, err := newestFile(files); err != nil {
-				log.Printf("Warning: %d cache files match %s, but could not compare mod times (%v); using %s", len(files), glob, err, filepath.Base(chosen))
-			} else {
-				log.Printf("Warning: %d cache files match %s, using the newest: %s", len(files), glob, filepath.Base(newest))
-				chosen = newest
-			}
+// resolveProvider maps a provider name from a flag/request into a
+// TTSProvider, using config for whatever that provider needs
+// (config.AuthKey for ElevenLabs, config.AudioCpp for audio.cpp). "" means
+// "elevenlabs" -- the feature is additive and off by default, so an empty
+// or omitted provider preserves today's behavior exactly.
+func resolveProvider(name string, config *Config) (TTSProvider, error) {
+	switch name {
+	case "", "elevenlabs":
+		return newElevenLabsProvider(config.AuthKey), nil
+	case "audiocpp":
+		if config.AudioCpp == nil || config.AudioCpp.BaseURL == "" {
+			return nil, fmt.Errorf(
+				"provider \"audiocpp\" requires audio_cpp.base_url to be set in config.yaml")
 		}
-		// found the previously generated file, extract the ID out of it
-		re := regexp.MustCompile(`([^.]+).mp3$`)
-		match := re.FindStringSubmatch(filepath.Base(chosen))
-		if len(match) > 1 {
-			return Path{Path: chosen, Template: template, Id: match[1]}
-		}
+		return newAudioCppProvider(*config.AudioCpp), nil
+	default:
+		return nil, fmt.Errorf("unknown TTS provider %q (want \"elevenlabs\" or \"audiocpp\")", name)
 	}
-
-	return Path{Template: template}
 }
 
 // newestFile returns the path with the most recent modification time among
@@ -585,14 +615,17 @@ func canMergeCue(curSpeaker, nextSpeaker string, mergedStart, mergedEnd, nextSta
 // parseSubtitleFile parses path, resolves each cue's speaker/speed, merges
 // adjacent same-speaker cues, and computes each cue's cache path.
 //
-// cacheDir, when non-empty, is where cached mp3 takes are looked up and
+// cacheDir, when non-empty, is where cached takes are looked up and
 // written; empty means the subtitle file's own directory, which is the
 // engine's standalone behavior and what the run command passes. The
 // session/app layer overrides it so several per-session work directories
-// can share one cache -- the cache key is content-addressed
-// (md5(voiceID+ttsModel+speed+text), see generatePathTemplate), so a hit
-// written by one session is byte-identical to what another would generate.
-func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs, mergeMaxMs int, cacheDir string) []Item {
+// can share one cache -- each provider's cache key is content-addressed
+// (see TTSProvider.CachePath), so a hit written by one session is
+// byte-identical to what another would generate.
+//
+// provider resolves each cue's cache path (and, for audio.cpp, its voice
+// reference) -- see TTSProvider.CachePath.
+func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs, mergeMaxMs int, cacheDir string, provider TTSProvider) []Item {
 	subs, err := astisub.OpenFile(path)
 	if err != nil {
 		log.Fatalf("Error parsing VTT file: %v", err)
@@ -600,6 +633,7 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs, merge
 
 	modelChannels := generateModelChannelMap(config)
 	items := make([]Item, 0)
+	referenceTextCache := make(map[string]string)
 	root, _ := filepath.Abs(filepath.Dir(path))
 	if cacheDir != "" {
 		root, _ = filepath.Abs(cacheDir)
@@ -710,28 +744,46 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs, merge
 			log.Fatalf("Error in subtitle #%d: %v", i+1, specErr)
 		}
 
-		var model Model
+		var speakerConfig SpeakerConfig
+		offset := 0
 		if modelName != "" {
-			modelConfig, err := lookupSpeakerModel(modelName, config)
+			var err error
+			speakerConfig, err = lookupSpeakerModel(modelName, config)
 			if err != nil {
 				log.Fatalf("Error in subtitle #%d: %v", i+1, err)
 			}
-			model = Model{name: modelConfig.Name, model: modelConfig.Model, offset: modelChannels[modelName], speed: modelConfig.Speed, ttsModel: resolveTTSModel(modelConfig, config)}
+			offset = modelChannels[modelName]
 		} else {
-			model = Model{name: config.Default.Name, model: config.Default.Model, offset: 0, speed: config.Default.Speed, ttsModel: resolveTTSModel(config.Default, config)}
+			speakerConfig = config.Default
 		}
 
-		// Applied before generatePathTemplate: the effective speed is already
-		// part of the cache checksum, so each speed of a line is its own file
-		// and every take stays on disk.
+		model := Model{name: speakerConfig.Name, model: speakerConfig.Model, offset: offset,
+			speed: speakerConfig.Speed, ttsModel: resolveTTSModel(speakerConfig, config)}
+
+		// Applied before provider.CachePath: the effective speed is already
+		// part of ElevenLabs' cache checksum, so each speed of a line is its
+		// own file and every take stays on disk. audio.cpp ignores it (see
+		// HANDOFF-audiocpp.local.md §2 #3: fitting to the cue already sets
+		// the pace, so a separate speed knob has no meaning for that
+		// provider) -- it's still recorded on the model for display/session
+		// purposes, just never sent to audio.cpp or folded into its cache key.
 		if hasLineSpeed {
 			model.speed = lineSpeed
+		}
+
+		if provider.Name() == "audiocpp" {
+			var err error
+			model.voiceRefPath = speakerConfig.VoiceRefPath
+			model.referenceText, err = loadReferenceText(speakerConfig.ReferenceTextPath, referenceTextCache)
+			if err != nil {
+				log.Fatalf("Error in subtitle #%d: loading reference text for %q: %v", i+1, speakerConfig.Name, err)
+			}
 		}
 
 		item := Item{
 			Sub:        sub,
 			Model:      model,
-			Path:       generatePathTemplate(root, sub, model),
+			Path:       provider.CachePath(root, sub, model),
 			MergedFrom: res.mergedFrom,
 		}
 
@@ -741,38 +793,20 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs, merge
 	return items
 }
 
-// previousIdsFor picks the request IDs this line should stitch onto: the up
-// to `want` nearest preceding cues (within `lookback` positions) that have
-// already been generated, in timeline order regardless of speaker or speed.
-// Request stitching is what makes a multi-speaker dialogue sound continuous
-// rather than a set of disconnected monologues, so the chain always follows
-// the actual sequence of lines -- it never skips a line because it's a
-// different voice or carries a per-line @speed override.
-func previousIdsFor(items []Item, item Item, want, lookback int) []string {
-	ids := make([]string, 0, want)
-	for i := item.Sub.Index - 1; i >= 0 && item.Sub.Index-i <= lookback && len(ids) < want; i-- {
-		if id := items[i].Path.Id; id != "" {
-			ids = append(ids, id)
-		}
-	}
-	return ids
-}
-
 // generateMissingVoiceLines synthesizes every cue that isn't already
-// cached, measures each cue's real duration, and returns them in subtitle
-// order.
+// cached via provider, measures each cue's real duration, and returns them
+// in subtitle order.
 //
 // Every failure is returned rather than fatal. This used to log.Fatal,
 // which was survivable for the run command (one process, one subtitle
 // file) but not for serve: one bad voice ID or one expired key took the
 // whole HTTP server down mid-request, for every session using it, without
-// writing a response. The TTS call itself is retried on transient
-// failures -- see withRetry and retryableTTSError.
-func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) ([]AudioFile, error) {
+// writing a response.
+func generateMissingVoiceLines(provider TTSProvider, items []Item) ([]AudioFile, error) {
 	audioFiles := make([]AudioFile, 0)
-	for _, item := range items {
+	for i, item := range items {
 		if item.Path.Path != "" {
-			duration, err := readAudioFileDuration(item.Path.Path)
+			duration, err := provider.ReadDuration(item.Path.Path)
 			if err != nil {
 				return nil, fmt.Errorf("reading cached audio %s duration: %w", item.Path.Path, err)
 			}
@@ -785,57 +819,11 @@ func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) ([]Audio
 			continue
 		}
 
-		previousRequestIds := previousIdsFor(items, item, 3, 10)
-
-		nextRequestIds := make([]string, 0)
-		nextText := ""
-		for i := item.Sub.Index + 1; i <= item.Sub.Index+3; i++ {
-			if i >= len(items) {
-				continue
-			}
-			if items[i].Path.Id == "" {
-				nextText = items[i].Sub.String()
-				break
-			}
-
-			nextRequestIds = append(nextRequestIds, items[i].Path.Id)
-		}
-
-		log.Printf("Speaking (as %s via %s) \"%s\"\n", item.Model.name, item.Model.ttsModel, item.Sub.String())
-		ttsReq := elevenlabs.TextToSpeechRequest{
-			VoiceSettings: &elevenlabs.VoiceSettings{
-				SpeakerBoost: true,
-				Speed:        item.Model.speed,
-			},
-			Text:               item.Sub.String(),
-			ModelID:            item.Model.ttsModel,
-			PreviousRequestIds: previousRequestIds,
-			NextRequestIds:     nextRequestIds,
-			NextText:           nextText,
-		}
-
-		var speech []byte
-		var id string
-		err := withRetry(defaultTTSRetryPolicy(), retryableTTSError, time.Sleep, func() error {
-			var callErr error
-			speech, id, callErr = client.TextToSpeechWithRequestID(item.Model.model, ttsReq)
-			return callErr
-		})
+		path, duration, err := provider.Synthesize(items, i)
 		if err != nil {
-			return nil, fmt.Errorf("synthesizing cue #%d as %s: %w", item.Sub.Index+1, item.Model.name, err)
+			return nil, fmt.Errorf("synthesizing cue #%d as %s via %s: %w", item.Sub.Index+1, item.Model.name, provider.Name(), err)
 		}
-
-		path := fmt.Sprintf(item.Path.Template, id)
-		if err := os.WriteFile(path, speech, 0644); err != nil {
-			return nil, fmt.Errorf("writing %s: %w", path, err)
-		}
-		log.Printf("Wrote %s\n", path)
 		item.Path.Path = path
-
-		duration, err := readAudioFileDuration(path)
-		if err != nil {
-			return nil, fmt.Errorf("reading audio file %s duration: %w", path, err)
-		}
 
 		audioFiles = append(audioFiles, AudioFile{
 			Item:     item,
@@ -848,22 +836,6 @@ func generateMissingVoiceLines(client *elevenlabs.Client, items []Item) ([]Audio
 	return audioFiles, nil
 }
 
-func readAudioFileDuration(path string) (time.Duration, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-
-	decoder, err := mp3.NewDecoder(f)
-	if err != nil {
-		return 0, err
-	}
-
-	duration := float64(decoder.Length()) / (4 * float64(decoder.SampleRate()))
-	return time.Duration(duration * float64(time.Second)), nil
-}
-
 // normalizeCeilingDb and normalizeMaxBoostDb bound normalizationGain: the
 // ceiling stops a gained-up clip from clipping, and the boost cap stops a
 // near-silent or broken generation (mostly noise floor, no real signal)
@@ -874,27 +846,30 @@ const (
 	normalizeMaxBoostDb = 24.0
 )
 
-// decodeSamples reads every sample from an mp3 decoder's left channel (the
-// mixing loop below has only ever used the left channel of the stereo PCM
-// go-mp3 decodes to, even for a mono voice source).
-func decodeSamples(decoder *mp3.Decoder) ([]int, error) {
-	samples := make([]int, 0, decoder.Length()/4)
-	tmpBuf := make([]byte, 4096)
-	for {
-		n, err := decoder.Read(tmpBuf)
-		if n > 0 {
-			for i := 0; i < n-1; i += 4 {
-				samples = append(samples, int(int16(tmpBuf[i])|int16(tmpBuf[i+1])<<8))
-			}
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
+// resampleLinear converts samples from srcRate to dstRate by linear
+// interpolation. Adequate for speech (per HANDOFF-audiocpp.local.md §4);
+// a windowed-sinc resampler would sound marginally better but isn't needed
+// for anything currently mixed into this engine's output -- audio.cpp's
+// IndexTTS model returns a clean 22,050 Hz, exactly half the mix's 44,100
+// Hz, so every source sample lands exactly on an output sample and the
+// interpolated points are the midpoints between them.
+func resampleLinear(samples []int, srcRate, dstRate int) []int {
+	if srcRate == dstRate || len(samples) == 0 {
+		return samples
 	}
-	return samples, nil
+	outLen := int(float64(len(samples)) * float64(dstRate) / float64(srcRate))
+	out := make([]int, outLen)
+	for i := range out {
+		srcPos := float64(i) * float64(srcRate) / float64(dstRate)
+		i0 := int(srcPos)
+		frac := srcPos - float64(i0)
+		if i0 >= len(samples)-1 {
+			out[i] = samples[len(samples)-1]
+			continue
+		}
+		out[i] = int(float64(samples[i0])*(1-frac) + float64(samples[i0+1])*frac)
+	}
+	return out
 }
 
 // normalizationGain computes the linear gain to bring samples' RMS level to
@@ -939,7 +914,7 @@ func normalizationGain(samples []int, targetDb float64) float64 {
 	return math.Pow(10, gainDb/20)
 }
 
-func generateFinalAudioFile(files []AudioFile, outputPath string, normalizeTargetDb float64) error {
+func generateFinalAudioFile(provider TTSProvider, files []AudioFile, outputPath string, normalizeTargetDb float64) error {
 	const sampleRate = 44100
 	const bitDepth = 16
 
@@ -966,22 +941,11 @@ func generateFinalAudioFile(files []AudioFile, outputPath string, normalizeTarge
 
 	for _, file := range files {
 		path := file.Item.Path.Path
-		f, err := os.Open(path)
-		if err != nil {
-			return fmt.Errorf("failed to open file %s: %w", path, err)
-		}
-
-		decoder, err := mp3.NewDecoder(f)
-		if err != nil {
-			f.Close()
-			return fmt.Errorf("failed to create decoder for %s: %w", path, err)
-		}
-
-		samples, err := decodeSamples(decoder)
-		f.Close()
+		samples, srcRate, err := provider.DecodeSamples(path)
 		if err != nil {
 			return fmt.Errorf("failed to read audio data from %s: %w", path, err)
 		}
+		samples = resampleLinear(samples, srcRate, sampleRate)
 
 		gain := 1.0
 		if normalizeTargetDb < 0 {

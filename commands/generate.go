@@ -7,11 +7,12 @@ import (
 // GenerateResult reports what a Generate call did, mirroring dub-studio's
 // core.generate_cues return dict.
 type GenerateResult struct {
-	RunNumber       int   `json:"run_number"`
-	Generated       []int `json:"generated"`
-	SkippedCached   int   `json:"skipped_cached"`
-	OverlapConflict bool  `json:"overlap_conflict"`
-	OverlappingCues []int `json:"overlapping_cues"`
+	RunNumber       int    `json:"run_number"`
+	Provider        string `json:"provider"` // "elevenlabs" | "audiocpp", whichever this call actually used
+	Generated       []int  `json:"generated"`
+	SkippedCached   int    `json:"skipped_cached"`
+	OverlapConflict bool   `json:"overlap_conflict"`
+	OverlappingCues []int  `json:"overlapping_cues"`
 	// AutoSped and StillBasketed summarize the automatic speed-convergence
 	// loop (see LocalService.Generate) that now runs inside every Generate
 	// call: how many distinct cues got a speed bump at some point during
@@ -29,7 +30,7 @@ type GenerateResult struct {
 // of scheduling review from here on. Ported from dub-studio's
 // core._cues_from_report, adapted from report-text scraping to direct
 // struct access since Generate now runs the engine in-process.
-func rebuildCuesAfterGenerate(oldCues []*SessionCue, audioFiles []AudioFile, overlapsByFirst map[int]cueOverlap) []*SessionCue {
+func rebuildCuesAfterGenerate(oldCues []*SessionCue, audioFiles []AudioFile, overlapsByFirst map[int]cueOverlap, provider string) []*SessionCue {
 	newCues := make([]*SessionCue, 0, len(audioFiles))
 	origIdx := 0
 	for i, af := range audioFiles {
@@ -61,17 +62,18 @@ func rebuildCuesAfterGenerate(oldCues []*SessionCue, audioFiles []AudioFile, ove
 		newCues = append(newCues, &SessionCue{
 			Index:   i + 1,
 			StartMs: int(af.Item.Sub.StartAt.Milliseconds()), EndMs: groupEndMs,
-			Voice:              af.Item.Model.name,
-			SourceText:         text,
-			CurrentText:        text,
-			Speed:              speed,
-			SpeedOverride:      override,
-			LastGeneratedText:  text,
-			LastGeneratedSpeed: speed,
-			HasLastGenerated:   true,
-			AudioMs:            &audioMs,
-			CachePath:          af.Item.Path.Path,
-			OverlapFlagged:     overlapped,
+			Voice:                 af.Item.Model.name,
+			SourceText:            text,
+			CurrentText:           text,
+			Speed:                 speed,
+			SpeedOverride:         override,
+			LastGeneratedText:     text,
+			LastGeneratedSpeed:    speed,
+			LastGeneratedProvider: provider,
+			HasLastGenerated:      true,
+			AudioMs:               &audioMs,
+			CachePath:             af.Item.Path.Path,
+			OverlapFlagged:        overlapped,
 		})
 	}
 	return newCues

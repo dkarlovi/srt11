@@ -38,6 +38,14 @@ type AutoFixCue struct {
 	NeedsHuman     bool
 	HumanReason    string
 	Skipped        bool // explicit "accept this line as-is" override, never re-evaluated
+	// Provider is which TTS provider generated AudioMs ("elevenlabs" |
+	// "audiocpp" | "" before any generate). audio.cpp already fits each
+	// cue's duration via duration_factor at synthesis time -- a
+	// still-overrunning audio.cpp cue means the fit was clamped (the text
+	// doesn't fit no matter what factor is applied), so a speed bump would
+	// be attempting a fix that provider has no lever for; see the gate in
+	// AutoFixDurations below.
+	Provider string
 }
 
 func (c *AutoFixCue) windowMs() int { return c.EndMs - c.StartMs }
@@ -191,10 +199,19 @@ func AutoFixDurations(cues []*AutoFixCue, cfg AutoFixConfig) AutoFixResult {
 			}
 		}
 
+		// audio.cpp already fit this cue's duration to its window via
+		// duration_factor at synthesis time -- it has no speed knob, so a
+		// still-overrunning audio.cpp cue means that fit was clamped (the
+		// text is too long no matter what factor is applied). There's
+		// nothing a Go-side speed bump can do about that; basket it
+		// straight away rather than attempt a "fix" this provider has no
+		// lever for.
+		canSpeedBump := c.Provider != "audiocpp"
+
 		cap := speedCapFor(c.Voice, cfg.SpeedCaps)
 		target := math.Max(1, float64(budget-cfg.AutofixMarginMs))
 		needed := c.Speed * (float64(*c.AudioMs) / target)
-		if needed <= cap {
+		if canSpeedBump && needed <= cap {
 			newSpeed := round2(math.Min(cap, math.Max(needed, c.Speed)))
 			if newSpeed > c.Speed {
 				result.Sped = append(result.Sped, SpeedChange{Index: c.Index, From: c.Speed, To: newSpeed})
@@ -212,7 +229,11 @@ func AutoFixDurations(cues []*AutoFixCue, cfg AutoFixConfig) AutoFixResult {
 			c.NeedsHuman = true
 			reason := strings.Join(reasons, ", ")
 			reason = strings.ToUpper(reason[:1]) + reason[1:]
-			c.HumanReason = fmt.Sprintf("%s — past the %.2fx cap for %s. Needs rewording.", reason, cap, c.Voice)
+			if canSpeedBump {
+				c.HumanReason = fmt.Sprintf("%s — past the %.2fx cap for %s. Needs rewording.", reason, cap, c.Voice)
+			} else {
+				c.HumanReason = fmt.Sprintf("%s — audio.cpp's fit-to-window was clamped, it can't be sped up further. Needs rewording.", reason)
+			}
 			result.Basketed = append(result.Basketed, BasketEntry{Index: c.Index, Reason: c.HumanReason})
 		}
 	}

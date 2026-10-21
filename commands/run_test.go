@@ -88,7 +88,7 @@ func TestParseSubtitleFile_MergeMaxMs(t *testing.T) {
 
 	t.Run("cap 7000ms splits into [1+2],[3]", func(t *testing.T) {
 		path := writeTempVTT(t, threeAbuttingSameVoiceCues)
-		items := parseSubtitleFile(cfg, path, 120, 7000, "")
+		items := parseSubtitleFile(cfg, path, 120, 7000, "", newElevenLabsProvider(""))
 
 		if len(items) != 2 {
 			t.Fatalf("want 2 merged cues, got %d: %+v", len(items), items)
@@ -103,7 +103,7 @@ func TestParseSubtitleFile_MergeMaxMs(t *testing.T) {
 
 	t.Run("cap 0 is unlimited: all three merge", func(t *testing.T) {
 		path := writeTempVTT(t, threeAbuttingSameVoiceCues)
-		items := parseSubtitleFile(cfg, path, 120, 0, "")
+		items := parseSubtitleFile(cfg, path, 120, 0, "", newElevenLabsProvider(""))
 
 		if len(items) != 1 {
 			t.Fatalf("want 1 merged cue, got %d: %+v", len(items), items)
@@ -128,7 +128,7 @@ one
 three
 `
 		path := writeTempVTT(t, vtt)
-		items := parseSubtitleFile(cfg, path, 120, 0, "")
+		items := parseSubtitleFile(cfg, path, 120, 0, "", newElevenLabsProvider(""))
 
 		if len(items) != 3 {
 			t.Fatalf("want 3 separate cues (Hana/Matko/Hana never merges across Matko), got %d: %+v", len(items), items)
@@ -205,7 +205,7 @@ func TestGeneratePathTemplate_PrefersNewestOnDuplicateCacheMatch(t *testing.T) {
 
 	// No cache files yet -- confirms the template and lets the test build
 	// matching filenames without hand-computing the checksum.
-	first := generatePathTemplate(dir, item, model)
+	first := newElevenLabsProvider("").CachePath(dir, item, model)
 	if first.Path != "" {
 		t.Fatalf("want no cache hit yet, got %+v", first)
 	}
@@ -216,7 +216,7 @@ func TestGeneratePathTemplate_PrefersNewestOnDuplicateCacheMatch(t *testing.T) {
 	writeFileWithModTime(t, olderPath, now.Add(-1*time.Hour))
 	writeFileWithModTime(t, newerPath, now)
 
-	got := generatePathTemplate(dir, item, model)
+	got := newElevenLabsProvider("").CachePath(dir, item, model)
 	if got.Id != "newer-id" {
 		t.Errorf("want the newest cache file's id %q, got %q (path %s)", "newer-id", got.Id, got.Path)
 	}
@@ -229,11 +229,11 @@ func TestGeneratePathTemplate_SingleCacheMatchUnaffected(t *testing.T) {
 	}
 	model := Model{model: "voice-id", name: "Hana", ttsModel: "eleven_multilingual_v2", speed: 1.2}
 
-	first := generatePathTemplate(dir, item, model)
+	first := newElevenLabsProvider("").CachePath(dir, item, model)
 	onlyPath := fmt.Sprintf(first.Template, "only-id")
 	writeFileWithModTime(t, onlyPath, time.Now())
 
-	got := generatePathTemplate(dir, item, model)
+	got := newElevenLabsProvider("").CachePath(dir, item, model)
 	if got.Id != "only-id" {
 		t.Errorf("want %q, got %q", "only-id", got.Id)
 	}
@@ -361,7 +361,7 @@ func TestGeneratePathTemplate_TruncatesLongTextByRuneNotByte(t *testing.T) {
 	}
 	model := Model{model: "voice-id", name: "Hana", ttsModel: "eleven_multilingual_v2", speed: 1.0}
 
-	path := generatePathTemplate(dir, item, model)
+	path := newElevenLabsProvider("").CachePath(dir, item, model)
 
 	if !utf8.ValidString(path.Template) {
 		t.Fatalf("template contains invalid UTF-8: %q", path.Template)
@@ -386,7 +386,7 @@ func TestParseSubtitleFile_MergeStripsEachLinesOwnSpeakerTag(t *testing.T) {
 [Matko] three
 `
 	path := writeTempVTT(t, vtt)
-	items := parseSubtitleFile(testConfig(), path, 120, 0, "")
+	items := parseSubtitleFile(testConfig(), path, 120, 0, "", newElevenLabsProvider(""))
 
 	if len(items) != 1 {
 		t.Fatalf("want 1 merged cue, got %d: %+v", len(items), items)
