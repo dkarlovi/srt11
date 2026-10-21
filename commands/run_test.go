@@ -438,3 +438,22 @@ func TestParseSubtitleFile_AudioCppMissingReferenceIsAnError(t *testing.T) {
 		}
 	})
 }
+
+func TestValidateAudioCppConfig(t *testing.T) {
+	if err := validateAudioCppConfig(nil); err != nil {
+		t.Errorf("nil config: %v", err)
+	}
+	err := validateAudioCppConfig(&AudioCppConfig{TakeFit: true, FitDuration: true})
+	if err == nil || !strings.Contains(err.Error(), "take_fit") {
+		t.Errorf("take_fit + fit_duration: err = %v, want an error naming take_fit", err)
+	}
+	if err := validateAudioCppConfig(&AudioCppConfig{TakeFit: true, Takes: -1}); err == nil {
+		t.Error("takes: -1 should be an error")
+	}
+	if got := (AudioCppConfig{TakeFit: true}).takeCount(); got != 6 {
+		t.Errorf("default takeCount = %d, want 6", got)
+	}
+	if got := (AudioCppConfig{Takes: 3}).takeCount(); got != 3 {
+		t.Errorf("takeCount = %d, want 3", got)
+	}
+}

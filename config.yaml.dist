@@ -37,3 +37,8 @@ models:
 #     # supports this; leave it off for other models (e.g. Higgs), which
 #     # ignore the factor.
 #     fit_duration: true
+#     # Experimental, for models without duration control (e.g. Higgs) --
+#     # not together with fit_duration: make several takes per cue, cut and
+#     # tighten each, keep the best, speed it up by 8 % at most.
+#     # take_fit: true
+#     # takes: 6

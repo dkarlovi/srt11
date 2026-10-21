@@ -56,6 +56,35 @@ type AudioCppConfig struct {
 	// window. Only IndexTTS honours it; other models (e.g. Higgs) return
 	// the same audio for any factor, so it's off unless set explicitly.
 	FitDuration bool `yaml:"fit_duration"`
+	// TakeFit fits takes after synthesis instead, for models without
+	// duration control (Higgs): several takes, cleaned, the best one picked,
+	// sped up by 8 % at most (see takefit.go). Experimental.
+	TakeFit bool `yaml:"take_fit"`
+	Takes   int  `yaml:"takes"` // takes per cue under take_fit; 0 means defaultTakes
+}
+
+const defaultTakes = 6
+
+func (c AudioCppConfig) takeCount() int {
+	if c.Takes == 0 {
+		return defaultTakes
+	}
+	return c.Takes
+}
+
+// validateAudioCppConfig rejects combinations readConfig's YAML decoding
+// can't: the two fit modes are alternatives, not layers.
+func validateAudioCppConfig(c *AudioCppConfig) error {
+	if c == nil {
+		return nil
+	}
+	if c.TakeFit && c.FitDuration {
+		return fmt.Errorf("audio_cpp: take_fit and fit_duration cannot both be true")
+	}
+	if c.Takes < 0 {
+		return fmt.Errorf("audio_cpp: takes must not be negative, got %d", c.Takes)
+	}
+	return nil
 }
 
 // defaultTTSModel is used when no tts_model is set anywhere in the config.
@@ -501,6 +530,9 @@ func readConfig(filename string) (*Config, error) {
 			return nil, fmt.Errorf("error parsing config file <info>%s</>:\n%s", filename, msg)
 		}
 		return nil, err
+	}
+	if err := validateAudioCppConfig(config.AudioCpp); err != nil {
+		return nil, fmt.Errorf("error in config file %s: %w", filename, err)
 	}
 	return &config, nil
 }
