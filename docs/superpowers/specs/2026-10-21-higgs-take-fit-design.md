@@ -72,8 +72,10 @@ When `take_fit` is true:
 2. **Word timings.** `POST /v1/audio/transcriptions/details` (multipart, same fields as `transcribe`).
    Response (verified 2026-10-21 against the local server):
    `{"text": "...", "sample_rate": 24000, "words": [{"word", "start_sample", "end_sample", "confidence"}], "timing": {...}}`.
-   Word sample positions are in `sample_rate` units, at 80 ms steps; the first word can start at 0
-   even after leading silence.
+   Word sample positions are at Parakeet's 16 kHz, **not** at `sample_rate` (which reports the input's
+   rate): found in the first experiment run, where reading them at 24 kHz cut the last third of every line.
+   `asrWordRate` uses 16 kHz unless that puts the last word > 5 % past the take's end. Positions come at
+   80 ms steps; the first word can start at 0 even after leading silence.
    If `words` is empty, skip the cut (step 3a) for that take.
 3. **Clean** (`cleanTake`, pure):
    a. Cut from `firstWord.start − takeFitLeadMargin` to `lastWord.end + takeFitTailMargin`, clamped to the take.

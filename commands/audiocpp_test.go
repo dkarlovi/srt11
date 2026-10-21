@@ -553,3 +553,22 @@ func TestAudioCppProvider_SynthesizeTakeFit(t *testing.T) {
 		}
 	})
 }
+
+func TestASRWordRate(t *testing.T) {
+	// Real response for a 4.56 s Higgs take (109440 samples at 24 kHz):
+	// sample_rate says 24000, but the last word ends at 71680 -- 4.48 s at
+	// Parakeet's 16 kHz, where the speech really ends; 2.99 s at 24 kHz
+	// would cut the last third of the line.
+	words := []asrWord{{Word: "Dyson", Start: 0, End: 17920}, {Word: "toothbrush.", Start: 57600, End: 71680}}
+	if got := asrWordRate(words, 24000, 109440, 24000); got != 16000 {
+		t.Errorf("got %d, want 16000", got)
+	}
+	// Positions that only fit the take at the reported rate are taken at it.
+	late := []asrWord{{Word: "a", Start: 0, End: 108000}}
+	if got := asrWordRate(late, 24000, 109440, 24000); got != 24000 {
+		t.Errorf("got %d, want the reported 24000", got)
+	}
+	if got := asrWordRate(nil, 24000, 109440, 24000); got != 24000 {
+		t.Errorf("no words: got %d, want the reported 24000", got)
+	}
+}

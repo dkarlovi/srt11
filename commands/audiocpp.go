@@ -525,8 +525,8 @@ func wordMisses(asr, text string) int {
 }
 
 // transcribeDetails calls POST /v1/audio/transcriptions/details, which
-// adds word timings to the transcript. Positions come back in the
-// response's own sample_rate; scaleWordSamples maps them to the take's.
+// adds word timings to the transcript. See asrWordRate for which rate the
+// positions are in; scaleWordSamples maps them to the take's.
 func (p *audioCppProvider) transcribeDetails(wavBytes []byte) (string, []asrWord, int, error) {
 	respBody, err := p.postASR("/v1/audio/transcriptions/details", wavBytes)
 	if err != nil {
@@ -549,6 +549,26 @@ func (p *audioCppProvider) transcribeDetails(wavBytes []byte) (string, []asrWord
 		words[i] = asrWord{Word: w.Word, Start: w.StartSample, End: w.EndSample}
 	}
 	return resp.Text, words, resp.SampleRate, nil
+}
+
+// audioCppASRWordRate is the rate /details word positions are really in:
+// Parakeet's own 16 kHz, whatever the response's sample_rate says (it
+// reports the input's rate -- 24000 for a Higgs take). Measured
+// 2026-10-21: reading them at 24 kHz ended every line a third early.
+const audioCppASRWordRate = 16000
+
+// asrWordRate picks the rate to read word positions at: 16 kHz, unless that
+// would put the last word more than 5 % past the end of the take, in which
+// case the server is taken at its word (fit_v3.py's heuristic, inverted).
+func asrWordRate(words []asrWord, reported, takeLen, takeRate int) int {
+	if len(words) == 0 {
+		return reported
+	}
+	end := float64(words[len(words)-1].End) / audioCppASRWordRate
+	if end <= 1.05*float64(takeLen)/float64(takeRate) {
+		return audioCppASRWordRate
+	}
+	return reported
 }
 
 func scaleWordSamples(words []asrWord, from, to int) []asrWord {
@@ -638,7 +658,7 @@ func (p *audioCppProvider) synthesizeTakeFit(item Item) (string, time.Duration, 
 				var asrRate int
 				_, ws, asrRate, err = p.transcribeDetails(audio)
 				if err == nil {
-					x = cleanTake(x, rate, scaleWordSamples(ws, asrRate, rate))
+					x = cleanTake(x, rate, scaleWordSamples(ws, asrWordRate(ws, asrRate, len(x), rate), rate))
 					var heard string
 					heard, err = p.transcribe(encodeWavFloat(x, rate))
 					if err == nil {

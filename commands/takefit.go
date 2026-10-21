@@ -29,7 +29,7 @@ const (
 	takeFitFade             = 0.040 // s
 	takeFitLoudFade         = 0.005 // s, never fade far into voice energy
 	takeFitLoudEdgeDb       = 10.0  // edge this far above the noise floor counts as loud
-	takeFitVersion          = "takefit-v1"
+	takeFitVersion          = "takefit-v2"
 )
 
 // asrWord is one word from /v1/audio/transcriptions/details, with sample
