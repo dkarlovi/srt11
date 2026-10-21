@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/asticode/go-astisub"
@@ -50,9 +51,18 @@ const (
 )
 
 type audioCppProvider struct {
-	baseURL string
-	model   string
-	client  *http.Client
+	baseURL     string
+	model       string
+	fitDuration bool
+	client      *http.Client
+
+	// refHashes memoizes each voice reference WAV's content hash, read once
+	// per distinct file rather than once per cue. Scoped to this provider,
+	// i.e. to one Generate/Export call (resolveProvider builds a fresh one
+	// each time): a process-wide map would race between tenants and keep
+	// serving a replaced WAV's old hash until restart.
+	mu        sync.Mutex
+	refHashes map[string]string
 }
 
 func newAudioCppProvider(cfg AudioCppConfig) *audioCppProvider {
@@ -61,9 +71,11 @@ func newAudioCppProvider(cfg AudioCppConfig) *audioCppProvider {
 		model = audioCppStructureModel
 	}
 	return &audioCppProvider{
-		baseURL: strings.TrimRight(cfg.BaseURL, "/"),
-		model:   model,
-		client:  &http.Client{Timeout: audioCppTimeout},
+		baseURL:     strings.TrimRight(cfg.BaseURL, "/"),
+		model:       model,
+		fitDuration: cfg.FitDuration,
+		client:      &http.Client{Timeout: audioCppTimeout},
+		refHashes:   make(map[string]string),
 	}
 }
 
@@ -86,12 +98,10 @@ func audioCppSlug(text string) string {
 	return slug
 }
 
-// voiceRefHashCache memoizes each voice reference WAV's content hash --
-// read once per distinct file rather than once per cue.
-var voiceRefHashCache = make(map[string]string)
-
-func voiceRefContentHash(path string) (string, error) {
-	if h, ok := voiceRefHashCache[path]; ok {
+func (p *audioCppProvider) voiceRefContentHash(path string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if h, ok := p.refHashes[path]; ok {
 		return h, nil
 	}
 	data, err := os.ReadFile(path)
@@ -100,26 +110,26 @@ func voiceRefContentHash(path string) (string, error) {
 	}
 	sum := sha256.Sum256(data)
 	h := fmt.Sprintf("%x", sum[:8])
-	voiceRefHashCache[path] = h
+	p.refHashes[path] = h
 	return h, nil
 }
 
 // CachePath's checksum covers the reference WAV's content (so re-recording
 // or swapping a voice invalidates old takes), the reference text, the
-// model, and the cue's window duration -- duration_factor is derived from
-// the window, so a different window is a materially different take, unlike
+// model, and whether takes are fitted. A fitted take also covers the cue's
+// window duration and the clamp bounds -- duration_factor is derived from
+// both, so a different window is a materially different take, unlike
 // ElevenLabs where retiming a cue doesn't change its audio at all (see
-// HANDOFF-audiocpp.local.md §9). It deliberately does NOT cover speed --
-// audio.cpp ignores @speed entirely (fitting to the cue already sets the
-// pace) -- or a seed: any successfully-verified take for the same
-// (voice, text, window) is equally valid to reuse regardless of which seed
+// HANDOFF-audiocpp.local.md §9). An unfitted take doesn't depend on the
+// window, so retiming reuses it. It deliberately does NOT cover speed --
+// audio.cpp ignores @speed entirely -- or a seed: any successfully-verified
+// take for the same key is equally valid to reuse regardless of which seed
 // produced it, exactly like ElevenLabs' request ID never being part of its
 // own cache key. The seed that actually produced a fresh take is recorded
 // in the filename (via the %s template placeholder), mirroring ElevenLabs'
 // request ID there.
 func (p *audioCppProvider) CachePath(root string, sub *astisub.Item, model Model) Path {
-	windowMs := (sub.EndAt - sub.StartAt).Milliseconds()
-	refHash, err := voiceRefContentHash(model.voiceRefPath)
+	refHash, err := p.voiceRefContentHash(model.voiceRefPath)
 	if err != nil {
 		// A missing/unreadable voice_ref is a real configuration error, not
 		// a cache-miss path -- Synthesize will hit the same file and fail
@@ -127,11 +137,14 @@ func (p *audioCppProvider) CachePath(root string, sub *astisub.Item, model Model
 		// hit rather than crashing path computation itself.
 		refHash = "unreadable"
 	}
-	// The clamp bounds are part of the key: they decide which factor a take
-	// was rendered at, so changing them must not reuse takes squeezed under
-	// the old bounds.
-	checksum := md5.Sum([]byte(refHash + model.referenceText + p.model + fmt.Sprintf("%d", windowMs) +
-		fmt.Sprintf("%g-%g", audioCppFactorMin, audioCppFactorMax) + sub.String()))
+	// The clamp bounds are part of a fitted key: they decide which factor a
+	// take was rendered at, so changing them must not reuse takes squeezed
+	// under the old bounds.
+	fit := "free"
+	if p.fitDuration {
+		fit = fmt.Sprintf("fit%d:%g-%g", (sub.EndAt - sub.StartAt).Milliseconds(), audioCppFactorMin, audioCppFactorMax)
+	}
+	checksum := md5.Sum([]byte(refHash + model.referenceText + p.model + fit + sub.String()))
 	template := filepath.Join(root, fmt.Sprintf("%X-%s-%s.%%s.wav", checksum[:4], model.name, audioCppSlug(sub.String())))
 
 	glob := fmt.Sprintf(template, "*")
@@ -316,7 +329,9 @@ func clampFactor(raw float64) (factor float64, clamped bool) {
 // a duration_factor from the cue's real window, speak the fitted take,
 // ASR-check it, and keep retrying with the next seed until a zero-miss take
 // is found or retries run out, keeping whichever attempt had the fewest
-// word misses. items/idx are accepted to satisfy TTSProvider but unused --
+// word misses. Without fit_duration (a model that ignores duration_factor,
+// e.g. Higgs) the free take is the one ASR-checked and kept: the cue is
+// then not fitted to its window at all, and AutoFix baskets any overrun. items/idx are accepted to satisfy TTSProvider but unused --
 // audio.cpp has no request-stitching equivalent (HANDOFF §9): each cue is
 // synthesized independently.
 func (p *audioCppProvider) Synthesize(items []Item, idx int) (string, time.Duration, error) {
@@ -342,27 +357,28 @@ func (p *audioCppProvider) Synthesize(items []Item, idx int) (string, time.Durat
 	for k := 0; k <= audioCppRetries; k++ {
 		seed := audioCppBaseSeed + k
 
-		_, freeDur, err := p.speak(text, seed, voiceRef, refText, nil)
+		takeAudio, takeDur, err := p.speak(text, seed, voiceRef, refText, nil)
 		if err != nil {
 			return "", 0, fmt.Errorf("cue #%d free take (seed %d): %w", item.Sub.Index+1, seed, err)
 		}
 
-		raw := window.Seconds() / freeDur.Seconds()
-		factor, clamped := clampFactor(raw)
-
-		fittedAudio, fittedDur, err := p.speak(text, seed, voiceRef, refText, &factor)
-		if err != nil {
-			return "", 0, fmt.Errorf("cue #%d fitted take (seed %d): %w", item.Sub.Index+1, seed, err)
+		factor, clamped := 1.0, false
+		if p.fitDuration {
+			factor, clamped = clampFactor(window.Seconds() / takeDur.Seconds())
+			takeAudio, takeDur, err = p.speak(text, seed, voiceRef, refText, &factor)
+			if err != nil {
+				return "", 0, fmt.Errorf("cue #%d fitted take (seed %d): %w", item.Sub.Index+1, seed, err)
+			}
 		}
 
-		heard, err := p.transcribe(fittedAudio)
+		heard, err := p.transcribe(takeAudio)
 		if err != nil {
 			return "", 0, fmt.Errorf("cue #%d ASR check (seed %d): %w", item.Sub.Index+1, seed, err)
 		}
 		misses := wordMisses(heard, text)
 
 		if best == nil || misses < best.misses {
-			best = &attempt{misses: misses, seed: seed, audio: fittedAudio, dur: fittedDur, factor: factor, clamped: clamped}
+			best = &attempt{misses: misses, seed: seed, audio: takeAudio, dur: takeDur, factor: factor, clamped: clamped}
 		}
 		if misses == 0 {
 			break
@@ -380,8 +396,11 @@ func (p *audioCppProvider) Synthesize(items []Item, idx int) (string, time.Durat
 	if err := os.WriteFile(path, best.audio, 0644); err != nil {
 		return "", 0, fmt.Errorf("writing %s: %w", path, err)
 	}
-	log.Printf("Wrote %s (audio.cpp, %d word misses, factor %.2f%s)\n", path, best.misses, best.factor,
-		map[bool]string{true: ", CLAMPED", false: ""}[best.clamped])
+	fitNote := "unfitted"
+	if p.fitDuration {
+		fitNote = fmt.Sprintf("factor %.2f%s", best.factor, map[bool]string{true: ", CLAMPED", false: ""}[best.clamped])
+	}
+	log.Printf("Wrote %s (audio.cpp, %d word misses, %s)\n", path, best.misses, fitNote)
 
 	return path, best.dur, nil
 }

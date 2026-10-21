@@ -132,7 +132,7 @@ func (ls *LocalService) writeAndParse(cues []*SessionCue, provider TTSProvider) 
 	if err := os.WriteFile(vttPath, writeSessionVTT(cues, ls.cfg.Engine.Default.Name), 0o644); err != nil {
 		return nil, fmt.Errorf("writing session vtt: %w", err)
 	}
-	return parseSubtitleFile(ls.cfg.Engine, vttPath, ls.cfg.MergeThresholdMs, ls.cfg.MergeMaxMs, ls.cfg.CacheDir, provider), nil
+	return parseSubtitleFile(ls.cfg.Engine, vttPath, ls.cfg.MergeThresholdMs, ls.cfg.MergeMaxMs, ls.cfg.CacheDir, provider)
 }
 
 // ErrProviderNotConfigured means the caller asked for a TTS provider this
@@ -223,7 +223,12 @@ func (ls *LocalService) generateOnce(s *Session, provider TTSProvider) (generate
 	overlapTolerance := time.Duration(ls.cfg.OverlapToleranceMs) * time.Millisecond
 	overlapsByFirst, overlaps := annotateOverlaps(audioFiles, findOverlaps(audioFiles, overlapTolerance))
 
+	// Session.Provider changes only here, together with the cues whose
+	// measurements it describes: a Generate that fails before this point
+	// leaves both as they were, so Export keeps reproducing the last
+	// generation that actually succeeded.
 	s.Cues = rebuildCuesAfterGenerate(s.Cues, audioFiles, overlapsByFirst, provider.Name())
+	s.Provider = provider.Name()
 
 	billedPositions := make([]int, 0)
 	for i, item := range items {
@@ -305,7 +310,6 @@ func (ls *LocalService) Generate(s *Session, providerName string) (GenerateResul
 	if err != nil {
 		return GenerateResult{}, err
 	}
-	s.Provider = provider.Name()
 
 	rounds, afResults, err := runConvergenceLoop(
 		func() (generateRoundResult, error) { return ls.generateOnce(s, provider) },

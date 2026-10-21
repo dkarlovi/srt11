@@ -1,13 +1,16 @@
 package commands
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -94,7 +97,7 @@ func TestClampFactor(t *testing.T) {
 func TestAudioCppProvider_CachePath(t *testing.T) {
 	dir := t.TempDir()
 	voiceRef := writeTestWAV(t, filepath.Join(dir, "matko.wav"), 22050, 1000)
-	p := newAudioCppProvider(AudioCppConfig{BaseURL: "http://127.0.0.1:8081"})
+	p := newAudioCppProvider(AudioCppConfig{BaseURL: "http://127.0.0.1:8081", FitDuration: true})
 
 	item := &astisub.Item{
 		StartAt: 0, EndAt: 3 * time.Second,
@@ -141,6 +144,55 @@ func TestAudioCppProvider_CachePath(t *testing.T) {
 		got := p.CachePath(dir, item, spedModel)
 		if got.Template != first.Template {
 			t.Error("want speed to have no effect on the audiocpp cache key -- that provider ignores @speed")
+		}
+	})
+
+	t.Run("unfitted takes are keyed apart from fitted ones and ignore the window", func(t *testing.T) {
+		free := newAudioCppProvider(AudioCppConfig{BaseURL: "http://127.0.0.1:8081"})
+		got := free.CachePath(dir, item, model)
+		if got.Template == first.Template {
+			t.Error("want an unfitted take to never reuse a fitted one")
+		}
+		longer := &astisub.Item{StartAt: 0, EndAt: 5 * time.Second, Lines: item.Lines}
+		if free.CachePath(dir, longer, model).Template != got.Template {
+			t.Error("want the window to have no effect on an unfitted take's key")
+		}
+	})
+}
+
+func TestAudioCppProvider_VoiceRefContentHash(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestWAV(t, filepath.Join(dir, "matko.wav"), 22050, 1000)
+
+	t.Run("concurrent lookups are safe", func(t *testing.T) {
+		// Run under -race: this used to be a package-global map shared by
+		// every tenant's Generate.
+		p := newAudioCppProvider(AudioCppConfig{BaseURL: "http://127.0.0.1:8081"})
+		var wg sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, err := p.voiceRefContentHash(path); err != nil {
+					t.Error(err)
+				}
+			}()
+		}
+		wg.Wait()
+	})
+
+	t.Run("a replaced reference is rehashed by the next provider", func(t *testing.T) {
+		before, err := newAudioCppProvider(AudioCppConfig{}).voiceRefContentHash(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeTestWAV(t, path, 22050, 2000)
+		after, err := newAudioCppProvider(AudioCppConfig{}).voiceRefContentHash(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if before == after {
+			t.Error("want a re-recorded voice_ref to produce a new hash without a restart")
 		}
 	})
 }
@@ -252,7 +304,7 @@ func TestAudioCppProvider_Synthesize(t *testing.T) {
 		srv := httptest.NewServer(fake.handler(t))
 		defer srv.Close()
 
-		p := newAudioCppProvider(AudioCppConfig{BaseURL: srv.URL})
+		p := newAudioCppProvider(AudioCppConfig{BaseURL: srv.URL, FitDuration: true})
 		items := buildItems(t.TempDir(), p)
 
 		path, dur, err := p.Synthesize(items, 0)
@@ -278,7 +330,7 @@ func TestAudioCppProvider_Synthesize(t *testing.T) {
 		srv := httptest.NewServer(fake.handler(t))
 		defer srv.Close()
 
-		p := newAudioCppProvider(AudioCppConfig{BaseURL: srv.URL})
+		p := newAudioCppProvider(AudioCppConfig{BaseURL: srv.URL, FitDuration: true})
 		items := buildItems(t.TempDir(), p)
 
 		path, _, err := p.Synthesize(items, 0)
@@ -305,7 +357,7 @@ func TestAudioCppProvider_Synthesize(t *testing.T) {
 		srv := httptest.NewServer(fake.handler(t))
 		defer srv.Close()
 
-		p := newAudioCppProvider(AudioCppConfig{BaseURL: srv.URL})
+		p := newAudioCppProvider(AudioCppConfig{BaseURL: srv.URL, FitDuration: true})
 		items := buildItems(t.TempDir(), p)
 
 		path, _, err := p.Synthesize(items, 0)
@@ -322,7 +374,7 @@ func TestAudioCppProvider_Synthesize(t *testing.T) {
 		srv := httptest.NewServer(fake.handler(t))
 		defer srv.Close()
 
-		p := newAudioCppProvider(AudioCppConfig{BaseURL: srv.URL})
+		p := newAudioCppProvider(AudioCppConfig{BaseURL: srv.URL, FitDuration: true})
 		sub := &astisub.Item{
 			StartAt: 0, EndAt: 3 * time.Second, // 3s window against a 100ms "free" take -> raw factor 30, clamped to 1.95
 			Lines: []astisub.Line{{Items: []astisub.LineItem{{Text: "plaque builds up on your teeth"}}}},
@@ -336,6 +388,36 @@ func TestAudioCppProvider_Synthesize(t *testing.T) {
 		}
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("want a take still written even when clamped: %v", err)
+		}
+	})
+
+	t.Run("without fit_duration one free take is verified and kept, no duration_factor sent", func(t *testing.T) {
+		fake := &audioCppTestServer{speakDurMs: []int{4200}, transcripts: []string{"plaque builds up on your teeth"}}
+		var sawFactor bool
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/audio/speech" {
+				var req speechRequest
+				body, _ := io.ReadAll(r.Body)
+				json.Unmarshal(body, &req)
+				sawFactor = sawFactor || req.Options != nil
+				r.Body = io.NopCloser(bytes.NewReader(body))
+			}
+			fake.handler(t)(w, r)
+		}))
+		defer srv.Close()
+
+		p := newAudioCppProvider(AudioCppConfig{BaseURL: srv.URL})
+		items := buildItems(t.TempDir(), p)
+
+		_, dur, err := p.Synthesize(items, 0)
+		if err != nil {
+			t.Fatalf("Synthesize: %v", err)
+		}
+		if fake.speakCalls != 1 || sawFactor {
+			t.Errorf("speakCalls = %d, sawFactor = %v; want one unfitted take", fake.speakCalls, sawFactor)
+		}
+		if dur < 4100*time.Millisecond {
+			t.Errorf("duration = %s, want the free take's ~4.2s, not the 3s window", dur)
 		}
 	})
 

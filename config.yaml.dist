@@ -33,3 +33,7 @@ models:
 # audio_cpp:
 #     base_url: "http://127.0.0.1:8081"
 #     model: "indextts-clone"
+#     # Fit each take to its cue's window via duration_factor. Only IndexTTS
+#     # supports this; leave it off for other models (e.g. Higgs), which
+#     # ignore the factor.
+#     fit_duration: true

@@ -99,8 +99,10 @@ func TestAutoFixDurations(t *testing.T) {
 		if c1.Speed != 1.0 || c1.SpeedOverride {
 			t.Errorf("cue 1 speed = %+v, want untouched (audio.cpp ignores it)", c1)
 		}
-		if !strings.Contains(c1.HumanReason, "clamped") {
-			t.Errorf("human_reason = %q, want it to explain the fit was clamped, not mention a speed cap", c1.HumanReason)
+		// Not "clamped": a model without fit_duration (e.g. Higgs) never
+		// fitted the take at all, so that explanation would be wrong.
+		if !strings.Contains(c1.HumanReason, "no speed control") || strings.Contains(c1.HumanReason, "cap") {
+			t.Errorf("human_reason = %q, want it to explain audio.cpp has no speed control, not mention a speed cap", c1.HumanReason)
 		}
 	})
 

@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -88,7 +89,10 @@ func TestParseSubtitleFile_MergeMaxMs(t *testing.T) {
 
 	t.Run("cap 7000ms splits into [1+2],[3]", func(t *testing.T) {
 		path := writeTempVTT(t, threeAbuttingSameVoiceCues)
-		items := parseSubtitleFile(cfg, path, 120, 7000, "", newElevenLabsProvider(""))
+		items, err := parseSubtitleFile(cfg, path, 120, 7000, "", newElevenLabsProvider(""))
+		if err != nil {
+			t.Fatalf("parseSubtitleFile: %v", err)
+		}
 
 		if len(items) != 2 {
 			t.Fatalf("want 2 merged cues, got %d: %+v", len(items), items)
@@ -103,7 +107,10 @@ func TestParseSubtitleFile_MergeMaxMs(t *testing.T) {
 
 	t.Run("cap 0 is unlimited: all three merge", func(t *testing.T) {
 		path := writeTempVTT(t, threeAbuttingSameVoiceCues)
-		items := parseSubtitleFile(cfg, path, 120, 0, "", newElevenLabsProvider(""))
+		items, err := parseSubtitleFile(cfg, path, 120, 0, "", newElevenLabsProvider(""))
+		if err != nil {
+			t.Fatalf("parseSubtitleFile: %v", err)
+		}
 
 		if len(items) != 1 {
 			t.Fatalf("want 1 merged cue, got %d: %+v", len(items), items)
@@ -128,7 +135,10 @@ one
 three
 `
 		path := writeTempVTT(t, vtt)
-		items := parseSubtitleFile(cfg, path, 120, 0, "", newElevenLabsProvider(""))
+		items, err := parseSubtitleFile(cfg, path, 120, 0, "", newElevenLabsProvider(""))
+		if err != nil {
+			t.Fatalf("parseSubtitleFile: %v", err)
+		}
 
 		if len(items) != 3 {
 			t.Fatalf("want 3 separate cues (Hana/Matko/Hana never merges across Matko), got %d: %+v", len(items), items)
@@ -386,7 +396,10 @@ func TestParseSubtitleFile_MergeStripsEachLinesOwnSpeakerTag(t *testing.T) {
 [Matko] three
 `
 	path := writeTempVTT(t, vtt)
-	items := parseSubtitleFile(testConfig(), path, 120, 0, "", newElevenLabsProvider(""))
+	items, err := parseSubtitleFile(testConfig(), path, 120, 0, "", newElevenLabsProvider(""))
+	if err != nil {
+		t.Fatalf("parseSubtitleFile: %v", err)
+	}
 
 	if len(items) != 1 {
 		t.Fatalf("want 1 merged cue, got %d: %+v", len(items), items)
@@ -398,4 +411,30 @@ func TestParseSubtitleFile_MergeStripsEachLinesOwnSpeakerTag(t *testing.T) {
 	if text != "one two three" {
 		t.Errorf("want %q, got %q", "one two three", text)
 	}
+}
+
+func TestParseSubtitleFile_AudioCppMissingReferenceIsAnError(t *testing.T) {
+	// Reachable from serve's Generate: this used to log.Fatal, taking every
+	// tenant down with it.
+	path := writeTempVTT(t, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n[Matko] hello\n")
+	cfg := testConfig()
+	matko := cfg.Models["Matko"]
+
+	t.Run("no voice_ref_path", func(t *testing.T) {
+		_, err := parseSubtitleFile(cfg, path, 0, 0, "", newAudioCppProvider(AudioCppConfig{}))
+		if !errors.Is(err, ErrProviderNotConfigured) {
+			t.Fatalf("err = %v, want ErrProviderNotConfigured", err)
+		}
+	})
+
+	t.Run("unreadable reference_text_path", func(t *testing.T) {
+		cfg := testConfig()
+		matko.VoiceRefPath = "/nonexistent/matko.wav"
+		matko.ReferenceTextPath = "/nonexistent/matko.txt"
+		cfg.Models["Matko"] = matko
+		_, err := parseSubtitleFile(cfg, path, 0, 0, "", newAudioCppProvider(AudioCppConfig{}))
+		if !errors.Is(err, ErrProviderNotConfigured) {
+			t.Fatalf("err = %v, want ErrProviderNotConfigured", err)
+		}
+	})
 }

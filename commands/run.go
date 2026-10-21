@@ -52,6 +52,10 @@ type Config struct {
 type AudioCppConfig struct {
 	BaseURL string `yaml:"base_url"` // e.g. "http://127.0.0.1:8081"
 	Model   string `yaml:"model"`    // e.g. "indextts-clone"
+	// FitDuration sends duration_factor to fit each take to its cue's
+	// window. Only IndexTTS honours it; other models (e.g. Higgs) return
+	// the same audio for any factor, so it's off unless set explicitly.
+	FitDuration bool `yaml:"fit_duration"`
 }
 
 // defaultTTSModel is used when no tts_model is set anywhere in the config.
@@ -379,7 +383,10 @@ func Run(c *console.Context) error {
 		return console.Exit(fmt.Sprintf("Error resolving TTS provider: %v", err), 1)
 	}
 
-	items := parseSubtitleFile(config, path, threshold, mergeMaxMs, "", provider)
+	items, err := parseSubtitleFile(config, path, threshold, mergeMaxMs, "", provider)
+	if err != nil {
+		return console.Exit(fmt.Sprintf("Error parsing subtitles: %v", err), 1)
+	}
 
 	audioFiles, err := generateMissingVoiceLines(provider, items)
 	if err != nil {
@@ -625,10 +632,15 @@ func canMergeCue(curSpeaker, nextSpeaker string, mergedStart, mergedEnd, nextSta
 //
 // provider resolves each cue's cache path (and, for audio.cpp, its voice
 // reference) -- see TTSProvider.CachePath.
-func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs, mergeMaxMs int, cacheDir string, provider TTSProvider) []Item {
+//
+// Every failure is returned, never fatal: serve calls this for every
+// tenant, and a speaker missing its audio.cpp reference used to log.Fatal
+// the whole process. That one wraps ErrProviderNotConfigured, so the HTTP
+// layer reports it as a 400 config problem rather than a 502.
+func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs, mergeMaxMs int, cacheDir string, provider TTSProvider) ([]Item, error) {
 	subs, err := astisub.OpenFile(path)
 	if err != nil {
-		log.Fatalf("Error parsing VTT file: %v", err)
+		return nil, fmt.Errorf("parsing subtitle file: %w", err)
 	}
 
 	modelChannels := generateModelChannelMap(config)
@@ -741,7 +753,7 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs, merge
 		// up, so "Matko@1.15" resolves against the configured "Matko".
 		modelName, lineSpeed, hasLineSpeed, specErr := splitSpeakerSpec(modelName)
 		if specErr != nil {
-			log.Fatalf("Error in subtitle #%d: %v", i+1, specErr)
+			return nil, fmt.Errorf("subtitle #%d: %w", i+1, specErr)
 		}
 
 		var speakerConfig SpeakerConfig
@@ -750,7 +762,7 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs, merge
 			var err error
 			speakerConfig, err = lookupSpeakerModel(modelName, config)
 			if err != nil {
-				log.Fatalf("Error in subtitle #%d: %v", i+1, err)
+				return nil, fmt.Errorf("subtitle #%d: %w", i+1, err)
 			}
 			offset = modelChannels[modelName]
 		} else {
@@ -772,11 +784,16 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs, merge
 		}
 
 		if provider.Name() == "audiocpp" {
+			if speakerConfig.VoiceRefPath == "" {
+				return nil, fmt.Errorf("%w: subtitle #%d: voice_ref_path is not set for speaker %q",
+					ErrProviderNotConfigured, i+1, speakerConfig.Name)
+			}
 			var err error
 			model.voiceRefPath = speakerConfig.VoiceRefPath
 			model.referenceText, err = loadReferenceText(speakerConfig.ReferenceTextPath, referenceTextCache)
 			if err != nil {
-				log.Fatalf("Error in subtitle #%d: loading reference text for %q: %v", i+1, speakerConfig.Name, err)
+				return nil, fmt.Errorf("%w: subtitle #%d: loading reference text for speaker %q: %v",
+					ErrProviderNotConfigured, i+1, speakerConfig.Name, err)
 			}
 		}
 
@@ -790,7 +807,7 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs, merge
 		items = append(items, item)
 	}
 
-	return items
+	return items, nil
 }
 
 // generateMissingVoiceLines synthesizes every cue that isn't already

@@ -191,7 +191,7 @@
       </button>
       <div id="provider-row" style="margin:-4px 0 10px">
         <select id="provider-select" title="TTS provider for the next Generate/regenerate">
-          <option value="">ElevenLabs</option>
+          <option value="elevenlabs">ElevenLabs</option>
           <option value="audiocpp">audio.cpp (local)</option>
         </select>
       </div>
@@ -261,7 +261,7 @@ function render(){
   // Reflect whichever provider this session actually last generated with
   // (persists across a page reload) rather than resetting the picker to
   // ElevenLabs every render.
-  document.getElementById('provider-select').value = (S && S.provider) || '';
+  document.getElementById('provider-select').value = (S && S.provider) || 'elevenlabs';
   document.getElementById('gen-pill').textContent = 'Run ' + (runs+1) + '/' + cap;
   const meter = document.getElementById('meter'); meter.innerHTML='';
   for(let i=0;i<cap;i++){ const d=document.createElement('div');
@@ -433,8 +433,9 @@ async function doUpload(input){
 // generateClick sends the provider picker's current value as the request
 // body -- dkarlovi's requirement that either TTS provider can be requested
 // per-request through the API, not only by a global config switch.
-// "" (ElevenLabs) reuses server-side defaults exactly as before this
-// selector existed.
+// ElevenLabs is sent as an explicit "elevenlabs", never "": the server
+// reads "" as "reuse the session's last provider", so "" could never
+// switch back from audio.cpp.
 function generateClick(){
   const provider = document.getElementById('provider-select').value;
   call('/generate', 'Generated', {provider});

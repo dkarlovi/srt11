@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 )
@@ -281,4 +282,35 @@ func TestBuildExportResult(t *testing.T) {
 			t.Errorf("basket = %v, want [3]", result.Basket)
 		}
 	})
+}
+
+func TestLocalService_Generate_FailureKeepsLastProvider(t *testing.T) {
+	// audio.cpp is configured, but no speaker has a voice reference: the
+	// switch fails while parsing, before any synthesis. That used to
+	// log.Fatal the whole serve process, and before that it had already
+	// switched Session.Provider, so the next Export would have resolved
+	// audio.cpp against cues ElevenLabs measured.
+	cfg := testServiceConfig()
+	engine := *cfg.Engine
+	engine.AudioCpp = &AudioCppConfig{BaseURL: "http://127.0.0.1:1"}
+	cfg.Engine = &engine
+	cfg.WorkDir = t.TempDir()
+	ls := NewLocalService(cfg)
+
+	audioMs := 900
+	s := &Session{Provider: "elevenlabs", Cues: []*SessionCue{
+		{Index: 1, StartMs: 0, EndMs: 1000, Voice: engine.Default.Name, CurrentText: "hello", Speed: 1.0,
+			AudioMs: &audioMs, LastGeneratedProvider: "elevenlabs"},
+	}}
+
+	_, err := ls.Generate(s, "audiocpp")
+	if !errors.Is(err, ErrProviderNotConfigured) {
+		t.Fatalf("err = %v, want ErrProviderNotConfigured (a 400, not a crash or a 502)", err)
+	}
+	if s.Provider != "elevenlabs" {
+		t.Errorf("Session.Provider = %q, want it left at the last successful generation's \"elevenlabs\"", s.Provider)
+	}
+	if s.Cues[0].LastGeneratedProvider != "elevenlabs" || *s.Cues[0].AudioMs != 900 {
+		t.Errorf("cue = %+v, want its ElevenLabs measurement untouched", s.Cues[0])
+	}
 }
