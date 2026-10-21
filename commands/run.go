@@ -113,6 +113,7 @@ type Model struct {
 	// audio.cpp fields (empty when this speaker/call uses ElevenLabs).
 	voiceRefPath  string
 	referenceText string // loaded contents of the speaker's ReferenceTextPath
+	roomMs        int64  // take_fit only: how long the take may run, see takeRoom
 }
 
 type Path struct {
@@ -837,6 +838,19 @@ func parseSubtitleFile(config *Config, path string, mergeLinesThresholdMs, merge
 		}
 
 		items = append(items, item)
+	}
+
+	// take_fit keys each take on its room, which depends on when the
+	// next cue starts -- only known once the loop above has built it.
+	if p, ok := provider.(*audioCppProvider); ok && p.takeFit {
+		for i := range items {
+			var next *time.Duration
+			if i+1 < len(items) {
+				next = &items[i+1].Sub.StartAt
+			}
+			items[i].Model.roomMs = takeRoom(items[i].Sub.StartAt, items[i].Sub.EndAt, next).Milliseconds()
+			items[i].Path = provider.CachePath(root, items[i].Sub, items[i].Model)
+		}
 	}
 
 	return items, nil

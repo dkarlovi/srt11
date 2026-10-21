@@ -457,3 +457,30 @@ func TestValidateAudioCppConfig(t *testing.T) {
 		t.Errorf("takeCount = %d, want 3", got)
 	}
 }
+
+func TestParseSubtitleFile_TakeFitRoom(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig()
+	cfg.Default.VoiceRefPath = writeTestWAV(t, filepath.Join(dir, "hana.wav"), 22050, 1000)
+	cfg.Default.ReferenceTextPath = filepath.Join(dir, "hana.txt")
+	if err := os.WriteFile(cfg.Default.ReferenceTextPath, []byte("ref"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path := writeTempVTT(t, "WEBVTT\n\n00:00:00.000 --> 00:00:03.000\none\n\n00:00:04.000 --> 00:00:06.000\ntwo\n")
+
+	items, err := parseSubtitleFile(cfg, path, 0, 0, "", newAudioCppProvider(AudioCppConfig{TakeFit: true}))
+	if err != nil {
+		t.Fatalf("parseSubtitleFile: %v", err)
+	}
+	if len(items) != 2 || items[0].Model.roomMs != 3880 || items[1].Model.roomMs != 3000 {
+		t.Fatalf("roomMs = %+v, want 3880 and 3000", items)
+	}
+
+	items, err = parseSubtitleFile(cfg, path, 0, 0, "", newAudioCppProvider(AudioCppConfig{}))
+	if err != nil {
+		t.Fatalf("parseSubtitleFile: %v", err)
+	}
+	if items[0].Model.roomMs != 0 || items[1].Model.roomMs != 0 {
+		t.Errorf("roomMs without take_fit = %d/%d, want 0", items[0].Model.roomMs, items[1].Model.roomMs)
+	}
+}

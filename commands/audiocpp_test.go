@@ -147,6 +147,21 @@ func TestAudioCppProvider_CachePath(t *testing.T) {
 		}
 	})
 
+	t.Run("take-fit takes are keyed apart and on the room", func(t *testing.T) {
+		tf := newAudioCppProvider(AudioCppConfig{BaseURL: "http://127.0.0.1:8081", TakeFit: true})
+		roomy := model
+		roomy.roomMs = 3000
+		got := tf.CachePath(dir, item, roomy)
+		free := newAudioCppProvider(AudioCppConfig{BaseURL: "http://127.0.0.1:8081"}).CachePath(dir, item, roomy)
+		if got.Template == first.Template || got.Template == free.Template {
+			t.Error("want take-fit takes never to reuse fitted or free ones")
+		}
+		roomy.roomMs = 3500
+		if tf.CachePath(dir, item, roomy).Template == got.Template {
+			t.Error("want a different room to change the take-fit cache key")
+		}
+	})
+
 	t.Run("unfitted takes are keyed apart from fitted ones and ignore the window", func(t *testing.T) {
 		free := newAudioCppProvider(AudioCppConfig{BaseURL: "http://127.0.0.1:8081"})
 		got := free.CachePath(dir, item, model)
@@ -256,6 +271,7 @@ func TestAudioCppProvider_ReadDurationAndDecodeSamples(t *testing.T) {
 type audioCppTestServer struct {
 	speakCalls  int
 	speakDurMs  []int
+	failSpeak   map[int]bool // 1-based speak call numbers answered with a 400
 	asrCalls    int
 	transcripts []string
 }
@@ -266,6 +282,11 @@ func (s *audioCppTestServer) handler(t *testing.T) http.HandlerFunc {
 		case "/v1/audio/speech":
 			durMs := s.speakDurMs[s.speakCalls%len(s.speakDurMs)]
 			s.speakCalls++
+			if s.failSpeak[s.speakCalls] {
+				w.WriteHeader(http.StatusBadRequest)
+				w.Write([]byte(`{"error":{"message":"max_tokens reached"}}`))
+				return
+			}
 			n := durMs * 22050 / 1000
 			tmp := filepath.Join(t.TempDir(), fmt.Sprintf("resp-%d.wav", s.speakCalls))
 			writeTestWAV(t, tmp, 22050, n)
@@ -275,6 +296,21 @@ func (s *audioCppTestServer) handler(t *testing.T) http.HandlerFunc {
 			}
 			w.WriteHeader(http.StatusOK)
 			w.Write(data)
+		case "/v1/audio/transcriptions/details":
+			// One word spanning the whole clip, at the clip's own rate.
+			r.ParseMultipartForm(32 << 20)
+			f, _, err := r.FormFile("file")
+			if err != nil {
+				t.Fatalf("details: no file: %v", err)
+			}
+			data, _ := io.ReadAll(f)
+			n := (len(data) - 44) / 2
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"text":        s.transcripts[0],
+				"sample_rate": 22050,
+				"words":       []map[string]any{{"word": "all", "start_sample": 0, "end_sample": n}},
+			})
 		case "/v1/audio/transcriptions":
 			text := s.transcripts[s.asrCalls%len(s.transcripts)]
 			s.asrCalls++
@@ -448,4 +484,72 @@ func TestRetryableAudioCppError(t *testing.T) {
 	if !retryableAudioCppError(fakeNetError{}) {
 		t.Error("a plain connection/timeout error should be retried")
 	}
+}
+
+func TestScaleWordSamples(t *testing.T) {
+	got := scaleWordSamples([]asrWord{{Word: "a", Start: 8000, End: 16000}}, 16000, 24000)
+	if got[0].Start != 12000 || got[0].End != 24000 {
+		t.Errorf("got %+v, want 12000..24000", got[0])
+	}
+}
+
+func TestAudioCppProvider_SynthesizeTakeFit(t *testing.T) {
+	dir := t.TempDir()
+	voiceRef := writeTestWAV(t, filepath.Join(dir, "hana.wav"), 22050, 1000)
+	const text = "plaque builds up on your teeth"
+	buildItems := func(p *audioCppProvider) []Item {
+		sub := &astisub.Item{StartAt: 0, EndAt: 3 * time.Second,
+			Lines: []astisub.Line{{Items: []astisub.LineItem{{Text: text}}}}}
+		model := Model{name: "Hana", voiceRefPath: voiceRef, referenceText: "ref", roomMs: 3000}
+		return []Item{{Sub: sub, Model: model, Path: p.CachePath(t.TempDir(), sub, model)}}
+	}
+
+	t.Run("a failed take is skipped", func(t *testing.T) {
+		fake := &audioCppTestServer{speakDurMs: []int{2800}, failSpeak: map[int]bool{1: true}, transcripts: []string{text}}
+		srv := httptest.NewServer(fake.handler(t))
+		defer srv.Close()
+		p := newAudioCppProvider(AudioCppConfig{BaseURL: srv.URL, TakeFit: true, Takes: 3})
+
+		path, _, err := p.Synthesize(buildItems(p), 0)
+		if err != nil {
+			t.Fatalf("Synthesize: %v", err)
+		}
+		if !strings.Contains(path, ".2.wav") {
+			t.Errorf("path = %s, want seed 2 (seed 1 failed, 2 and 3 tie)", path)
+		}
+		if fake.speakCalls != 3 {
+			t.Errorf("speakCalls = %d, want 3", fake.speakCalls)
+		}
+	})
+
+	t.Run("all takes failing is an error", func(t *testing.T) {
+		fake := &audioCppTestServer{speakDurMs: []int{2800}, failSpeak: map[int]bool{1: true, 2: true, 3: true}, transcripts: []string{text}}
+		srv := httptest.NewServer(fake.handler(t))
+		defer srv.Close()
+		p := newAudioCppProvider(AudioCppConfig{BaseURL: srv.URL, TakeFit: true, Takes: 3})
+
+		_, _, err := p.Synthesize(buildItems(p), 0)
+		if err == nil || !strings.Contains(err.Error(), "cue #1") {
+			t.Fatalf("err = %v, want an error naming cue #1", err)
+		}
+	})
+
+	t.Run("a take longer than its room is sped up by 8 % at most", func(t *testing.T) {
+		fake := &audioCppTestServer{speakDurMs: []int{4000}, transcripts: []string{text}}
+		srv := httptest.NewServer(fake.handler(t))
+		defer srv.Close()
+		p := newAudioCppProvider(AudioCppConfig{BaseURL: srv.URL, TakeFit: true, Takes: 1})
+
+		path, dur, err := p.Synthesize(buildItems(p), 0)
+		if err != nil {
+			t.Fatalf("Synthesize: %v", err)
+		}
+		want := 3704 * time.Millisecond // 4 s / 1.08
+		if dur > want+50*time.Millisecond || dur < want-50*time.Millisecond {
+			t.Errorf("duration = %s, want %s ± 50ms", dur, want)
+		}
+		if got, err := p.ReadDuration(path); err != nil || got != dur {
+			t.Errorf("file duration = %s (%v), want the returned %s", got, err, dur)
+		}
+	})
 }

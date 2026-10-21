@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"crypto/md5"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -54,6 +56,8 @@ type audioCppProvider struct {
 	baseURL     string
 	model       string
 	fitDuration bool
+	takeFit     bool
+	takes       int
 	client      *http.Client
 
 	// refHashes memoizes each voice reference WAV's content hash, read once
@@ -74,6 +78,8 @@ func newAudioCppProvider(cfg AudioCppConfig) *audioCppProvider {
 		baseURL:     strings.TrimRight(cfg.BaseURL, "/"),
 		model:       model,
 		fitDuration: cfg.FitDuration,
+		takeFit:     cfg.TakeFit,
+		takes:       cfg.takeCount(),
 		client:      &http.Client{Timeout: audioCppTimeout},
 		refHashes:   make(map[string]string),
 	}
@@ -141,7 +147,10 @@ func (p *audioCppProvider) CachePath(root string, sub *astisub.Item, model Model
 	// take was rendered at, so changing them must not reuse takes squeezed
 	// under the old bounds.
 	fit := "free"
-	if p.fitDuration {
+	switch {
+	case p.takeFit:
+		fit = fmt.Sprintf("takes:%s:%d:%d:%d", takeFitVersion, p.takes, (sub.EndAt - sub.StartAt).Milliseconds(), model.roomMs)
+	case p.fitDuration:
 		fit = fmt.Sprintf("fit%d:%g-%g", (sub.EndAt - sub.StartAt).Milliseconds(), audioCppFactorMin, audioCppFactorMax)
 	}
 	checksum := md5.Sum([]byte(refHash + model.referenceText + p.model + fit + sub.String()))
@@ -211,23 +220,7 @@ func (p *audioCppProvider) speak(text string, seed int, voiceRef, referenceText 
 // HANDOFF-audiocpp.local.md §8). The server accepts IndexTTS's 22,050 Hz
 // WAV directly, so no resampling is needed here.
 func (p *audioCppProvider) transcribe(wavBytes []byte) (string, error) {
-	var buf bytes.Buffer
-	w := multipart.NewWriter(&buf)
-	if err := w.WriteField("model", audioCppASRModel); err != nil {
-		return "", err
-	}
-	part, err := w.CreateFormFile("file", "clip.wav")
-	if err != nil {
-		return "", err
-	}
-	if _, err := part.Write(wavBytes); err != nil {
-		return "", err
-	}
-	if err := w.Close(); err != nil {
-		return "", err
-	}
-
-	respBody, err := p.post("/v1/audio/transcriptions", w.FormDataContentType(), &buf)
+	respBody, err := p.postASR("/v1/audio/transcriptions", wavBytes)
 	if err != nil {
 		return "", err
 	}
@@ -238,6 +231,26 @@ func (p *audioCppProvider) transcribe(wavBytes []byte) (string, error) {
 		return "", fmt.Errorf("decoding transcription response: %w", err)
 	}
 	return resp.Text, nil
+}
+
+// postASR posts wavBytes as the multipart form both ASR endpoints take.
+func (p *audioCppProvider) postASR(path string, wavBytes []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	if err := w.WriteField("model", audioCppASRModel); err != nil {
+		return nil, err
+	}
+	part, err := w.CreateFormFile("file", "clip.wav")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := part.Write(wavBytes); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return p.post(path, w.FormDataContentType(), &buf)
 }
 
 // post issues one HTTP POST with retry on transient failure (same policy
@@ -335,6 +348,9 @@ func clampFactor(raw float64) (factor float64, clamped bool) {
 // audio.cpp has no request-stitching equivalent (HANDOFF §9): each cue is
 // synthesized independently.
 func (p *audioCppProvider) Synthesize(items []Item, idx int) (string, time.Duration, error) {
+	if p.takeFit {
+		return p.synthesizeTakeFit(items[idx])
+	}
 	item := items[idx]
 	text := item.Sub.String()
 	window := item.Sub.EndAt - item.Sub.StartAt
@@ -506,4 +522,168 @@ func wordMisses(asr, text string) int {
 		}
 	}
 	return dp[n][m]
+}
+
+// transcribeDetails calls POST /v1/audio/transcriptions/details, which
+// adds word timings to the transcript. Positions come back in the
+// response's own sample_rate; scaleWordSamples maps them to the take's.
+func (p *audioCppProvider) transcribeDetails(wavBytes []byte) (string, []asrWord, int, error) {
+	respBody, err := p.postASR("/v1/audio/transcriptions/details", wavBytes)
+	if err != nil {
+		return "", nil, 0, err
+	}
+	var resp struct {
+		Text       string `json:"text"`
+		SampleRate int    `json:"sample_rate"`
+		Words      []struct {
+			Word        string `json:"word"`
+			StartSample int    `json:"start_sample"`
+			EndSample   int    `json:"end_sample"`
+		} `json:"words"`
+	}
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return "", nil, 0, fmt.Errorf("decoding transcription details: %w", err)
+	}
+	words := make([]asrWord, len(resp.Words))
+	for i, w := range resp.Words {
+		words[i] = asrWord{Word: w.Word, Start: w.StartSample, End: w.EndSample}
+	}
+	return resp.Text, words, resp.SampleRate, nil
+}
+
+func scaleWordSamples(words []asrWord, from, to int) []asrWord {
+	if from == to || from <= 0 {
+		return words
+	}
+	out := make([]asrWord, len(words))
+	for i, w := range words {
+		out[i] = asrWord{Word: w.Word, Start: w.Start * to / from, End: w.End * to / from}
+	}
+	return out
+}
+
+// decodeWavFloat reads a WAV's first channel as float64 samples in [-1, 1].
+func decodeWavFloat(b []byte) ([]float64, int, error) {
+	buf, err := wav.NewDecoder(bytes.NewReader(b)).FullPCMBuffer()
+	if err != nil {
+		return nil, 0, err
+	}
+	ch := max(1, buf.Format.NumChannels)
+	scale := float64(int(1) << (max(8, buf.SourceBitDepth) - 1))
+	x := make([]float64, 0, len(buf.Data)/ch)
+	for i := 0; i < len(buf.Data); i += ch {
+		x = append(x, float64(buf.Data[i])/scale)
+	}
+	return x, buf.Format.SampleRate, nil
+}
+
+// encodeWavFloat writes x as a mono 16-bit PCM WAV. The header is written
+// by hand: go-audio's encoder needs an io.WriteSeeker, and the cleaned take
+// goes to ASR from memory before it's ever written to disk.
+func encodeWavFloat(x []float64, rate int) []byte {
+	var b bytes.Buffer
+	dataLen := len(x) * 2
+	le := func(v any) { binary.Write(&b, binary.LittleEndian, v) }
+	b.WriteString("RIFF")
+	le(uint32(36 + dataLen))
+	b.WriteString("WAVEfmt ")
+	le(uint32(16))
+	le(uint16(1)) // PCM
+	le(uint16(1)) // mono
+	le(uint32(rate))
+	le(uint32(rate * 2))
+	le(uint16(2))
+	le(uint16(16))
+	b.WriteString("data")
+	le(uint32(dataLen))
+	for _, v := range x {
+		le(int16(math.Max(-32768, math.Min(32767, math.Round(v*32767)))))
+	}
+	return b.Bytes()
+}
+
+// synthesizeTakeFit is Synthesize under take_fit (spec data flow, steps
+// 1-10): speak p.takes free takes, cut and tighten each at its word
+// timings, score the cleaned take by ASR, keep the best, and speed it up by
+// takeFitMaxSpeedup at most if it runs past its room. A failed take only
+// costs that seed: Higgs sometimes never ends a short line.
+func (p *audioCppProvider) synthesizeTakeFit(item Item) (string, time.Duration, error) {
+	cue := item.Sub.Index + 1
+	text := item.Sub.String()
+	window := item.Sub.EndAt - item.Sub.StartAt
+	room := time.Duration(item.Model.roomMs) * time.Millisecond
+	voiceRef, refText := item.Model.voiceRefPath, item.Model.referenceText
+	if voiceRef == "" || refText == "" {
+		return "", 0, fmt.Errorf("cue #%d (%s): voice_ref_path/reference_text_path not configured for this speaker", cue, item.Model.name)
+	}
+
+	type take struct {
+		samples []float64
+		rate    int
+		rawDur  time.Duration
+		misses  int
+	}
+	var takes []take
+	var cands []takeCandidate
+	var lastErr error
+	nWords := max(1, len(words(text)))
+	for seed := 1; seed <= p.takes; seed++ {
+		audio, rawDur, err := p.speak(text, seed, voiceRef, refText, nil)
+		if err == nil {
+			var x []float64
+			var rate int
+			x, rate, err = decodeWavFloat(audio)
+			if err == nil {
+				var ws []asrWord
+				var asrRate int
+				_, ws, asrRate, err = p.transcribeDetails(audio)
+				if err == nil {
+					x = cleanTake(x, rate, scaleWordSamples(ws, asrRate, rate))
+					var heard string
+					heard, err = p.transcribe(encodeWavFloat(x, rate))
+					if err == nil {
+						misses := wordMisses(heard, text)
+						takes = append(takes, take{x, rate, rawDur, misses})
+						cands = append(cands, takeCandidate{
+							Seed: seed,
+							Dur:  time.Duration(float64(len(x)) / float64(rate) * float64(time.Second)),
+							WER:  float64(misses) / float64(nWords),
+						})
+						continue
+					}
+				}
+			}
+		}
+		lastErr = err
+		log.Printf("audio.cpp cue #%d: take %d failed, skipping: %v", cue, seed, err)
+	}
+
+	best := selectTake(cands, window)
+	if best < 0 {
+		return "", 0, fmt.Errorf("cue #%d: all %d takes failed, last error: %w", cue, p.takes, lastErr)
+	}
+	chosen, c := takes[best], cands[best]
+
+	x, factor := chosen.samples, 1.0
+	if c.Dur > room {
+		factor = math.Min(c.Dur.Seconds()/room.Seconds(), takeFitMaxSpeedup)
+		x = wsola(x, chosen.rate, factor)
+	}
+	x = fadeEdges(x, chosen.rate)
+
+	path := fmt.Sprintf(item.Path.Template, fmt.Sprintf("%d", c.Seed))
+	encoded := encodeWavFloat(x, chosen.rate)
+	if err := os.WriteFile(path, encoded, 0644); err != nil {
+		return "", 0, fmt.Errorf("writing %s: %w", path, err)
+	}
+	// Measured the way ReadDuration measures a cache hit, so a fresh take
+	// and its later reuse report the same duration.
+	dur, err := wavDuration(bytes.NewReader(encoded))
+	if err != nil {
+		return "", 0, fmt.Errorf("reading duration of %s: %w", path, err)
+	}
+	log.Printf("Wrote %s (audio.cpp take fit: seed %d of %d ok, %d word misses, raw %s, cleaned %s, window %s, room %s, speed-up %.3f)\n",
+		path, c.Seed, len(cands), chosen.misses, chosen.rawDur.Round(time.Millisecond), c.Dur.Round(time.Millisecond),
+		window, room, factor)
+	return path, dur, nil
 }
