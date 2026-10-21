@@ -3,6 +3,7 @@ package commands
 import (
 	"math"
 	"testing"
+	"time"
 )
 
 const tfRate = 24000
@@ -153,4 +154,51 @@ func TestWSOLA_KeepsLevelToTheEnd(t *testing.T) {
 			t.Errorf("%s: %.1f dBFS, want the input's -13.5 ± 1.5", part.name, db)
 		}
 	}
+}
+
+func TestTakeRoom(t *testing.T) {
+	d := func(s float64) *time.Duration { v := time.Duration(s * float64(time.Second)); return &v }
+	for _, tc := range []struct {
+		name string
+		next *time.Duration
+		want time.Duration
+	}{
+		{"pause after the window", d(4), 3880 * time.Millisecond},
+		{"next cue abuts", d(3), 3 * time.Second},
+		{"next cue overlaps", d(2.5), 3 * time.Second},
+		{"last cue", nil, 4 * time.Second},
+	} {
+		if got := takeRoom(0, 3*time.Second, tc.next); got != tc.want {
+			t.Errorf("%s: room = %s, want %s", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestSelectTake(t *testing.T) {
+	s := func(v float64) time.Duration { return time.Duration(v * float64(time.Second)) }
+	window := 3 * time.Second
+
+	t.Run("nearest length among good takes", func(t *testing.T) {
+		got := selectTake([]takeCandidate{{1, s(3.5), 0}, {2, s(3.1), 0.05}, {3, s(3.0), 0.3}}, window)
+		if got != 1 {
+			t.Errorf("got %d, want 1 (take 3 is nearer but not good)", got)
+		}
+	})
+	t.Run("no good take: best two by WER, then nearest length", func(t *testing.T) {
+		got := selectTake([]takeCandidate{{1, s(3.0), 0.5}, {2, s(4.0), 0.2}, {3, s(3.2), 0.3}}, window)
+		if got != 2 {
+			t.Errorf("got %d, want 2", got)
+		}
+	})
+	t.Run("length tie: lower WER, then lower seed", func(t *testing.T) {
+		got := selectTake([]takeCandidate{{3, s(3.1), 0}, {1, s(2.9), 0.05}, {2, s(3.1), 0}}, window)
+		if got != 2 {
+			t.Errorf("got %d, want 2 (WER 0, seed 2)", got)
+		}
+	})
+	t.Run("no takes", func(t *testing.T) {
+		if got := selectTake(nil, window); got != -1 {
+			t.Errorf("got %d, want -1", got)
+		}
+	})
 }

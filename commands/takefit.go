@@ -3,6 +3,7 @@ package commands
 import (
 	"math"
 	"sort"
+	"time"
 )
 
 // Take fit: fitting audio.cpp takes to their cue windows after synthesis,
@@ -243,6 +244,74 @@ func bestContinuation(x []float64, natural, nominal, tol, overlap, n int) int {
 		}
 		if score := dot / math.Sqrt(energy+1e-12); score > bestScore {
 			best, bestScore = c, score
+		}
+	}
+	return best
+}
+
+const (
+	takeFitGap         = 120 * time.Millisecond // kept clear before the next cue
+	takeFitLastCueRoom = time.Second            // room after the last cue's window
+	takeFitGoodWER     = 0.10
+)
+
+// takeRoom is how long a take may run at natural speed: its window plus
+// the pause after it, up to takeFitGap before the next cue of any speaker
+// starts, but never less than the window itself. next is nil for the last
+// cue.
+func takeRoom(start, end time.Duration, next *time.Duration) time.Duration {
+	window := end - start
+	if next == nil {
+		return window + takeFitLastCueRoom
+	}
+	return max(window, *next-takeFitGap-start)
+}
+
+type takeCandidate struct {
+	Seed int
+	Dur  time.Duration
+	WER  float64
+}
+
+// selectTake picks a take the way fit_v2 did: among the good ones (WER at
+// most takeFitGoodWER, or else the two with the lowest WER), the one whose
+// length is nearest the window; ties go to the lower WER, then the lower
+// seed. Returns an index into cands, or -1 if there are none.
+func selectTake(cands []takeCandidate, window time.Duration) int {
+	if len(cands) == 0 {
+		return -1
+	}
+	idx := make([]int, 0, len(cands))
+	for i, c := range cands {
+		if c.WER <= takeFitGoodWER {
+			idx = append(idx, i)
+		}
+	}
+	if len(idx) == 0 {
+		idx = make([]int, len(cands))
+		for i := range cands {
+			idx[i] = i
+		}
+		sort.SliceStable(idx, func(a, b int) bool { return cands[idx[a]].WER < cands[idx[b]].WER })
+		idx = idx[:min(2, len(idx))]
+	}
+	lengthKey := func(c takeCandidate) float64 {
+		return math.Round(math.Abs(c.Dur.Seconds()/window.Seconds()-1)*100) / 100
+	}
+	best := idx[0]
+	for _, i := range idx[1:] {
+		a, b := cands[i], cands[best]
+		switch {
+		case lengthKey(a) != lengthKey(b):
+			if lengthKey(a) < lengthKey(b) {
+				best = i
+			}
+		case a.WER != b.WER:
+			if a.WER < b.WER {
+				best = i
+			}
+		case a.Seed < b.Seed:
+			best = i
 		}
 	}
 	return best
