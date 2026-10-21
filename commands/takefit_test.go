@@ -102,3 +102,55 @@ func TestFadeEdges(t *testing.T) {
 		}
 	})
 }
+
+func TestWSOLA_IdentityAtOne(t *testing.T) {
+	x := tfVoice(0.5)
+	for _, f := range []float64{1.0, 0.95} {
+		out := wsola(x, tfRate, f)
+		if len(out) != len(x) || out[100] != x[100] {
+			t.Errorf("f=%g: want the input unchanged", f)
+		}
+	}
+}
+
+func TestWSOLA_Length(t *testing.T) {
+	x := tfVoice(2)
+	out := wsola(x, tfRate, 1.08)
+	want := float64(len(x)) / 1.08
+	if math.Abs(float64(len(out))-want)/want > 0.01 {
+		t.Errorf("len = %d, want %.0f ± 1%%", len(out), want)
+	}
+}
+
+func TestWSOLA_PreservesPitch(t *testing.T) {
+	out := wsola(tfVoice(2), tfRate, 1.08)
+	mid := out[len(out)/2-tfRate/2 : len(out)/2+tfRate/2]
+	crossings := 0
+	for i := 1; i < len(mid); i++ {
+		if (mid[i-1] < 0) != (mid[i] < 0) {
+			crossings++
+		}
+	}
+	if hz := float64(crossings) / 2; math.Abs(hz-220)/220 > 0.02 {
+		t.Errorf("pitch = %.1f Hz, want 220 Hz ± 2%%", hz)
+	}
+}
+
+func TestWSOLA_ShorterThanFrame(t *testing.T) {
+	x := tfVoice(0.01)
+	if out := wsola(x, tfRate, 1.08); len(out) != len(x) {
+		t.Errorf("len = %d, want the %d-sample input unchanged", len(out), len(x))
+	}
+}
+
+func TestWSOLA_KeepsLevelToTheEnd(t *testing.T) {
+	out := wsola(tfVoice(2), tfRate, 1.08)
+	for _, part := range []struct {
+		name string
+		x    []float64
+	}{{"middle", out[len(out)/2 : len(out)/2+tfSec(0.1)]}, {"last 50 ms", out[len(out)-tfSec(0.05):]}} {
+		if db := frameDb(part.x, len(part.x))[0]; math.Abs(db-(-13.5)) > 1.5 {
+			t.Errorf("%s: %.1f dBFS, want the input's -13.5 ± 1.5", part.name, db)
+		}
+	}
+}

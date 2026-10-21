@@ -167,3 +167,83 @@ func percentile(v []float64, p float64) float64 {
 	sort.Float64s(s)
 	return s[int(p/100*float64(len(s)-1))]
 }
+
+const (
+	takeFitMaxSpeedup = 1.08  // largest wsola factor; Matko heard 15-24 % clearly, 8 % is fine
+	wsolaFrame        = 0.030 // s
+	wsolaSearch       = 0.010 // s, ± around the nominal analysis position
+	wsolaMinWindowSum = 1e-6
+)
+
+// wsola shortens x by factor f (> 1 is faster) without changing its pitch:
+// waveform-similarity overlap-add. Each 30 ms Hann frame is taken from
+// around its nominal position (k * hop * f), shifted by up to ±10 ms to the
+// offset that best continues the previous frame, and overlap-added at
+// k * hop. This is what the POC got from ffmpeg's atempo, which this binary
+// can't call. f <= 1, or x shorter than one frame, returns x unchanged.
+func wsola(x []float64, rate int, f float64) []float64 {
+	n := int(wsolaFrame * float64(rate))
+	if f <= 1 || len(x) < n {
+		return x
+	}
+	hs := n / 2
+	tol := int(wsolaSearch * float64(rate))
+	outLen := int(float64(len(x)) / f)
+
+	win := make([]float64, n)
+	for i := range win {
+		win[i] = 0.5 - 0.5*math.Cos(2*math.Pi*float64(i)/float64(n))
+	}
+	out := make([]float64, outLen+n)
+	wsum := make([]float64, outLen+n)
+
+	prev := 0
+	for k := 0; k*hs < outLen; k++ {
+		c := 0
+		if k > 0 {
+			nominal := int(math.Round(float64(k*hs) * f))
+			c = bestContinuation(x, prev+hs, nominal, tol, hs, n)
+			if c < 0 {
+				break
+			}
+		}
+		for i := 0; i < n && c+i < len(x); i++ {
+			out[k*hs+i] += x[c+i] * win[i]
+			wsum[k*hs+i] += win[i]
+		}
+		prev = c
+	}
+	for i := range out {
+		if wsum[i] > wsolaMinWindowSum {
+			out[i] /= wsum[i]
+		}
+	}
+	return out[:outLen]
+}
+
+// bestContinuation returns the frame start within ±tol of nominal whose
+// first overlap samples best match x[natural:] (normalized
+// cross-correlation), or -1 when no full frame fits in x any more.
+func bestContinuation(x []float64, natural, nominal, tol, overlap, n int) int {
+	lo, hi := max(0, nominal-tol), min(len(x)-n, nominal+tol)
+	if lo > hi {
+		return -1
+	}
+	if natural+overlap > len(x) {
+		return lo
+	}
+	ref := x[natural : natural+overlap]
+	best, bestScore := lo, math.Inf(-1)
+	for c := lo; c <= hi; c++ {
+		var dot, energy float64
+		for i, r := range ref {
+			v := x[c+i]
+			dot += v * r
+			energy += v * v
+		}
+		if score := dot / math.Sqrt(energy+1e-12); score > bestScore {
+			best, bestScore = c, score
+		}
+	}
+	return best
+}
