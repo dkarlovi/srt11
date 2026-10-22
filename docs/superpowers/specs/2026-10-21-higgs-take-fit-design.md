@@ -197,3 +197,33 @@ Known bias: C has a room-tone bed and its breaths removed; A and B have neither.
 - B preferred over A: keep the branch; next sub-projects are breaths (3), room tone (5), sentence merge (6).
 - No clear preference: report the numbers, and decide with Matko whether to tune or drop.
 - A preferred: drop the branch.
+
+## Result (2026-10-22) — parked, not merged
+
+Matko's listening verdict on the Dyson passage: **no clear improvement**. A sounded best, but one of its
+5 same-speaker collisions was audible ("two Hanas for a second"). B cut a word in line 5 ("Four
+hundred-something euros"). C had hisses in the silences (its synthesised room tone). Decision: keep this
+branch unmerged, for later tuning if the current direction (translation to a length budget, natural pace)
+runs into the same fitting problems.
+
+Numbers (13 sentence cues, one speaker, `-t 60000` on export so that A could be exported at all):
+
+| | A unfitted | B take fit |
+|---|---|---|
+| Lines basketed | 5 | 0 |
+| Largest overrun past the window | 0.92 s | 0.17 s |
+| Lines with zero ASR word misses | 6 | 10 |
+| Largest speed-up | — | 5.1 % (4 lines sped up) |
+
+Where to start if this is picked up again:
+
+- **Selection rule (likely cause of B's cut word).** Line 5's chosen take had 1 word miss: `takeFitGoodWER`
+  counts 1 miss in 10 words as good, and `selectTake` then ranks length above correctness. Try: zero-miss
+  takes first, then the WER ≤ 10 % set, then length.
+- **The test hardly exercised the timing lever.** The passage's cues abut, so `room` was usually just the
+  window. Retest on material with real pauses (e.g. the two-speaker `convo2.json`).
+- **A's advantage is partly the export override.** In the real flow A's export is blocked and 5 lines need
+  rewording; B's gain is less manual work rather than better sound.
+- Deferred review minors: empty/short takes winning the best-two fallback, WER > 10 % only logged,
+  `asrWordRate` with `sample_rate` 0, no 16 kHz-path test through `synthesizeTakeFit`, README silent on
+  `take_fit`.
